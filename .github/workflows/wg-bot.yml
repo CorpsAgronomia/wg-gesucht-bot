@@ -101,10 +101,15 @@ jobs:
         run: echo "Workflow finished without running the bot."
 
       - name: Restore authenticated session
-        if: steps.random_skip.outputs.should_run == 'true' && steps.night_cooldown.outputs.should_run == 'true' && secrets.WG_SESSION_JSON != ''
+        if: steps.random_skip.outputs.should_run == 'true' && steps.night_cooldown.outputs.should_run == 'true'
         run: |
-          mkdir -p auth
-          printf '%s' "$WG_SESSION_JSON" > auth/session.json
+          if [ -n "$WG_SESSION_JSON" ]; then
+            mkdir -p auth
+            printf '%s' "$WG_SESSION_JSON" > auth/session.json
+            echo "Restored auth/session.json"
+          else
+            echo "WG_SESSION_JSON not set; continuing without restored session"
+          fi
         env:
           WG_SESSION_JSON: ${{ secrets.WG_SESSION_JSON }}
 
