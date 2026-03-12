@@ -12,7 +12,9 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 95
+    env:
+      TZ: Europe/Berlin
 
     steps:
       - name: Checkout repository
@@ -29,7 +31,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Install Chromium
-        run: playwright install --with-deps chromium
+        run: python -m playwright install --with-deps chromium
 
       - name: Random skip
         id: random_skip
@@ -37,22 +39,53 @@ jobs:
           python - <<'PY'
           import os
           import random
+          import sys
 
           event_name = os.environ["GITHUB_EVENT_NAME"]
-          should_run = event_name != "schedule" or random.random() <= 0.25
-          message = (
-              "Continuing execution"
-              if should_run
-              else "Skipping scheduled run"
-          )
-          print(message)
+          should_run = True
+
+          if event_name == "schedule" and random.random() > 0.45:
+              should_run = False
+              print("Skipping run")
+          else:
+              print("Continuing execution")
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
               handle.write(f"should_run={'true' if should_run else 'false'}\n")
+
+          if not should_run:
+              sys.exit(0)
+          PY
+
+      - name: Night cooldown
+        if: steps.random_skip.outputs.should_run == 'true'
+        id: night_cooldown
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          event_name = os.environ["GITHUB_EVENT_NAME"]
+          now = datetime.now(ZoneInfo("Europe/Berlin"))
+          should_run = event_name != "schedule" or not (2 <= now.hour <= 7)
+
+          print(f"Europe/Berlin time: {now.isoformat()}")
+          if should_run:
+              print("Outside night cooldown window")
+          else:
+              print("Skipping run for night cooldown")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"should_run={'true' if should_run else 'false'}\n")
+
+          if not should_run:
+              sys.exit(0)
           PY
 
       - name: Random delay
-        if: steps.random_skip.outputs.should_run == 'true' && github.event_name == 'schedule'
+        if: steps.random_skip.outputs.should_run == 'true' && steps.night_cooldown.outputs.should_run == 'true' && github.event_name == 'schedule'
         run: |
           python - <<'PY'
           import random
@@ -63,14 +96,18 @@ jobs:
           time.sleep(delay)
           PY
 
+      - name: Run skipped summary
+        if: steps.random_skip.outputs.should_run != 'true' || steps.night_cooldown.outputs.should_run != 'true'
+        run: echo "Workflow finished without running the bot."
+
       - name: Run WG Bot
-        if: steps.random_skip.outputs.should_run == 'true'
-        run: python main.py
+        if: steps.random_skip.outputs.should_run == 'true' && steps.night_cooldown.outputs.should_run == 'true'
+        run: RUN_ONCE=true python main.py
         env:
           WG_EMAIL: ${{ secrets.WG_EMAIL }}
           WG_PASSWORD: ${{ secrets.WG_PASSWORD }}
           LISTING_IDS: ${{ secrets.LISTING_IDS }}
           HEADLESS: "true"
           DRY_RUN: "false"
-          RUN_ONCE: "true"
+          TIMEZONE: "Europe/Berlin"
           PYTHONUNBUFFERED: "1"

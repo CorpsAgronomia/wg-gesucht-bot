@@ -7,6 +7,7 @@
 - [ ] Confirm the `Install dependencies` step completes successfully.
 - [ ] Confirm the `Install Chromium` step completes successfully.
 - [ ] Confirm the `Random skip` step prints `Continuing execution`.
+- [ ] Confirm the `Night cooldown` step reports a run is allowed.
 - [ ] Confirm the `Run WG Bot` step starts `python main.py`.
 - [ ] Confirm the bot logs show a completed single execution cycle.
 - [ ] Confirm the listing update flow returns HTTP `200`.
