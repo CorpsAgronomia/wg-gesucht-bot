@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import httpx
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
 from bot.captcha_detector import CaptchaDetectedError, ensure_no_captcha
@@ -43,6 +44,8 @@ CSRF_SELECTORS = (
     "input[name='csrf_token']",
     "input[name='xsrf_token']",
 )
+REFRESH_SESSION_URL = "https://www.wg-gesucht.de/ajax/sessions.php?action=refresh"
+DEFAULT_CLIENT_ID = "wg_desktop_website"
 
 
 class SessionManagerError(RuntimeError):
@@ -96,6 +99,57 @@ def _cookie_value(cookies: list[dict[str, Any]], *names: str) -> str:
         if name in expected:
             return str(cookie.get("value", "")).strip()
     return ""
+
+
+def _cookies_to_httpx(cookies: list[dict[str, Any]]) -> httpx.Cookies:
+    jar = httpx.Cookies()
+    for cookie in cookies:
+        name = str(cookie.get("name", "")).strip()
+        value = str(cookie.get("value", ""))
+        if not name:
+            continue
+
+        kwargs: dict[str, Any] = {}
+        if cookie.get("domain"):
+            kwargs["domain"] = str(cookie["domain"])
+        if cookie.get("path"):
+            kwargs["path"] = str(cookie["path"])
+        jar.set(name, value, **kwargs)
+    return jar
+
+
+def _serialize_cookies(cookies: httpx.Cookies) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for cookie in cookies.jar:
+        serialized.append(
+            {
+                "name": cookie.name,
+                "value": cookie.value,
+                "domain": cookie.domain,
+                "path": cookie.path,
+                "expires": cookie.expires,
+                "httpOnly": "HttpOnly" in getattr(cookie, "_rest", {}),
+                "secure": bool(cookie.secure),
+                "sameSite": getattr(cookie, "_rest", {}).get("SameSite"),
+            }
+        )
+    return serialized
+
+
+def _parse_refresh_payload(response: httpx.Response) -> dict[str, Any]:
+    try:
+        payload = json.loads(response.text)
+    except json.JSONDecodeError as exc:
+        raise SessionManagerError("Token refresh returned an invalid response body.") from exc
+
+    if not isinstance(payload, dict):
+        raise SessionManagerError("Token refresh returned an invalid payload.")
+
+    detail = payload.get("detail")
+    if not isinstance(detail, dict):
+        raise SessionManagerError("Token refresh response is missing detail data.")
+
+    return detail
 
 
 async def _dismiss_cookie_banner(page: Page, settings: Settings, logger) -> None:
@@ -340,6 +394,74 @@ async def login_and_capture_session(
         await browser_session.close()
 
 
+async def refresh_session_via_api(
+    session: SessionData,
+    *,
+    settings: Settings,
+    logger,
+) -> SessionData:
+    if not session.access_token or not session.refresh_token or not session.user_id or not session.dev_ref_no:
+        raise SessionManagerError("Stored session does not contain enough data for token refresh.")
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Referer": "https://www.wg-gesucht.de/mein-wg-gesucht.html",
+        "User-Agent": session.user_agent or settings.user_agent,
+        "X-Authorization": f"Bearer {session.access_token}",
+        "X-Client-Id": session.client_id or DEFAULT_CLIENT_ID,
+        "X-Dev-Ref-No": session.dev_ref_no,
+        "X-Requested-With": "XMLHttpRequest",
+        "X-Smp-Client": "WG-Gesucht",
+        "X-User-Id": session.user_id,
+    }
+
+    async with httpx.AsyncClient(
+        timeout=settings.request_timeout_seconds,
+        follow_redirects=True,
+        cookies=_cookies_to_httpx(session.cookies),
+    ) as client:
+        response = await client.put(REFRESH_SESSION_URL, headers=headers)
+        if response.status_code >= 400:
+            raise SessionManagerError(
+                f"Token refresh failed with HTTP {response.status_code}."
+            )
+
+        detail = _parse_refresh_payload(response)
+        refreshed_cookies = _serialize_cookies(client.cookies)
+        refreshed_session = SessionData(
+            cookies=refreshed_cookies,
+            csrf_token=str(detail.get("csrf_token", "")).strip() or session.csrf_token,
+            user_agent=session.user_agent or settings.user_agent,
+            captured_at=_utc_now(),
+            access_token=str(detail.get("access_token", "")).strip()
+            or _cookie_value(refreshed_cookies, "X-Access-Token"),
+            refresh_token=str(detail.get("refresh_token", "")).strip()
+            or _cookie_value(refreshed_cookies, "X-Refresh-Token"),
+            client_id=session.client_id or DEFAULT_CLIENT_ID,
+            dev_ref_no=str(detail.get("dev_ref_no", "")).strip()
+            or _cookie_value(refreshed_cookies, "X-Dev-Ref-No", "dev_ref_no"),
+            user_id=str(detail.get("user_id", "")).strip() or session.user_id,
+            login_token=_cookie_value(refreshed_cookies, "login_token") or session.login_token,
+        )
+
+    if not refreshed_session.access_token or not refreshed_session.csrf_token:
+        raise SessionManagerError("Token refresh response did not contain usable session data.")
+
+    log_event(
+        logger,
+        "session_refreshed",
+        status="success",
+        component="session",
+        method="api",
+        cookie_count=len(refreshed_session.cookies),
+        csrf_token_present=bool(refreshed_session.csrf_token),
+        user_id_present=bool(refreshed_session.user_id),
+        access_token_present=bool(refreshed_session.access_token),
+    )
+    return refreshed_session
+
+
 def save_session(
     session: SessionData,
     settings: Settings | None = None,
@@ -392,6 +514,12 @@ async def refresh_session(settings: Settings | None = None, logger=None) -> Sess
     settings = settings or load_settings()
     logger = _get_logger(logger)
     try:
+        with suppress(FileNotFoundError, SessionManagerError):
+            existing_session = load_session(settings=settings)
+            session = await refresh_session_via_api(existing_session, settings=settings, logger=logger)
+            save_session(session, settings=settings)
+            return session
+
         session = await login_and_capture_session(settings=settings, logger=logger)
         save_session(session, settings=settings)
         return session
