@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
+from time import monotonic
 from typing import Callable, TypeAlias
 
 from playwright.async_api import Locator, Page
@@ -44,6 +46,27 @@ def has_text_selector(selector: str, value: str) -> LocatorFactory:
     return lambda scope: scope.locator(selector).filter(has_text=value)
 
 
+async def _first_visible_locator(locator: Locator, timeout_ms: int) -> Locator:
+    deadline = monotonic() + (timeout_ms / 1000)
+    last_error: Exception | None = None
+
+    while monotonic() < deadline:
+        try:
+            count = await locator.count()
+            for index in range(count):
+                candidate = locator.nth(index)
+                if await candidate.is_visible():
+                    return candidate
+        except Exception as exc:
+            last_error = exc
+
+        await asyncio.sleep(0.1)
+
+    if last_error is not None:
+        raise last_error
+    raise TimeoutError(f"No visible elements found within {timeout_ms}ms.")
+
+
 async def resolve(
     scope: Scope,
     group: SelectorGroup,
@@ -60,10 +83,9 @@ async def resolve(
     async for attempt in retrying:
         with attempt:
             for factory in group.factories:
-                locator = factory(scope).first
+                locator = factory(scope)
                 try:
-                    await locator.wait_for(state="visible", timeout=per_selector_timeout)
-                    return locator
+                    return await _first_visible_locator(locator, per_selector_timeout)
                 except Exception as exc:
                     last_error = exc
 
@@ -95,10 +117,9 @@ async def resolve_optional(
     per_selector_timeout = max(750, effective_timeout // max(1, len(group.factories)))
 
     for factory in group.factories:
-        locator = factory(scope).first
+        locator = factory(scope)
         try:
-            await locator.wait_for(state="visible", timeout=per_selector_timeout)
-            return locator
+            return await _first_visible_locator(locator, per_selector_timeout)
         except Exception:
             continue
     return None
