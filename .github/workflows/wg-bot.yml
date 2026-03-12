@@ -1,0 +1,76 @@
+name: WG Gesucht Bot
+
+on:
+  schedule:
+    - cron: "13 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: wg-gesucht-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Chromium
+        run: playwright install --with-deps chromium
+
+      - name: Random skip
+        id: random_skip
+        run: |
+          python - <<'PY'
+          import os
+          import random
+
+          event_name = os.environ["GITHUB_EVENT_NAME"]
+          should_run = event_name != "schedule" or random.random() <= 0.25
+          message = (
+              "Continuing execution"
+              if should_run
+              else "Skipping scheduled run"
+          )
+          print(message)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"should_run={'true' if should_run else 'false'}\n")
+          PY
+
+      - name: Random delay
+        if: steps.random_skip.outputs.should_run == 'true' && github.event_name == 'schedule'
+        run: |
+          python - <<'PY'
+          import random
+          import time
+
+          delay = random.randint(0, 3600)
+          print(f"Sleeping {delay} seconds")
+          time.sleep(delay)
+          PY
+
+      - name: Run WG Bot
+        if: steps.random_skip.outputs.should_run == 'true'
+        run: python main.py
+        env:
+          WG_EMAIL: ${{ secrets.WG_EMAIL }}
+          WG_PASSWORD: ${{ secrets.WG_PASSWORD }}
+          LISTING_IDS: ${{ secrets.LISTING_IDS }}
+          HEADLESS: "true"
+          DRY_RUN: "false"
+          RUN_ONCE: "true"
+          PYTHONUNBUFFERED: "1"

@@ -1,0 +1,409 @@
+from __future__ import annotations
+
+import json
+import logging
+from contextlib import suppress
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
+
+from bot.captcha_detector import CaptchaDetectedError, ensure_no_captcha
+from bot.config import Settings, load_settings
+from bot.logger import log_event
+from bot.selectors import (
+    ACCOUNT_MENU,
+    COOKIE_ACCEPT,
+    LOGIN_BUTTON,
+    LOGIN_EMAIL,
+    LOGIN_ERROR,
+    LOGIN_PASSWORD,
+    LOGOUT_LINK,
+    MY_LISTINGS,
+    REMEMBER_ME,
+    click,
+    click_optional,
+    fill,
+    is_visible,
+    resolve_optional,
+    wait_for_any,
+)
+
+
+AUTH_MARKERS = (MY_LISTINGS, LOGOUT_LINK)
+CSRF_COOKIE_NAMES = ("csrf", "xsrf", "_csrf", "token")
+CSRF_SELECTORS = (
+    "meta[name='csrf-token']",
+    "meta[name='_csrf']",
+    "meta[name='csrf']",
+    "input[name='csrf']",
+    "input[name='_csrf']",
+    "input[name='csrf_token']",
+    "input[name='xsrf_token']",
+)
+
+
+class SessionManagerError(RuntimeError):
+    pass
+
+
+@dataclass(slots=True, frozen=True)
+class SessionData:
+    cookies: list[dict[str, Any]]
+    csrf_token: str
+    user_agent: str
+    captured_at: str
+    access_token: str = ""
+    refresh_token: str = ""
+    client_id: str = ""
+    dev_ref_no: str = ""
+    user_id: str = ""
+    login_token: str = ""
+
+
+@dataclass(slots=True)
+class AuthenticatedBrowserSession:
+    playwright: Playwright
+    browser: Browser
+    context: BrowserContext
+    page: Page
+
+    async def close(self) -> None:
+        with suppress(Exception):
+            await self.page.close()
+        with suppress(Exception):
+            await self.context.close()
+        with suppress(Exception):
+            await self.browser.close()
+        with suppress(Exception):
+            await self.playwright.stop()
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _get_logger(logger):
+    return logger or logging.getLogger("wg_bump_bot")
+
+
+def _cookie_value(cookies: list[dict[str, Any]], *names: str) -> str:
+    expected = {name.lower() for name in names}
+    for cookie in cookies:
+        name = str(cookie.get("name", "")).lower()
+        if name in expected:
+            return str(cookie.get("value", "")).strip()
+    return ""
+
+
+async def _dismiss_cookie_banner(page: Page, settings: Settings, logger) -> None:
+    if await click_optional(page, COOKIE_ACCEPT, settings=settings, logger=logger, timeout_ms=2000):
+        log_event(logger, "cookie_banner_dismissed", status="success", component="session")
+
+
+async def _is_authenticated(page: Page, settings: Settings, logger) -> bool:
+    if await wait_for_any(page, AUTH_MARKERS, settings=settings, logger=logger, timeout_ms=2500):
+        return True
+
+    account_menu = await resolve_optional(page, ACCOUNT_MENU, settings=settings, logger=logger, timeout_ms=2500)
+    if account_menu is None:
+        return False
+
+    with suppress(Exception):
+        await account_menu.click()
+
+    match = await wait_for_any(
+        page,
+        (*AUTH_MARKERS, LOGIN_EMAIL),
+        settings=settings,
+        logger=logger,
+        timeout_ms=3000,
+    )
+    return bool(match and match[0].name in {MY_LISTINGS.name, LOGOUT_LINK.name})
+
+
+async def _extract_login_error(page: Page, settings: Settings, logger) -> str:
+    locator = await resolve_optional(page, LOGIN_ERROR, settings=settings, logger=logger, timeout_ms=2000)
+    if locator is None:
+        return "Login did not complete successfully."
+    text = (await locator.inner_text()).strip()
+    return text or "Login did not complete successfully."
+
+
+async def _open_login_form(page: Page, settings: Settings, logger) -> None:
+    if await is_visible(page, LOGIN_EMAIL, settings=settings, logger=logger, timeout_ms=2000):
+        log_event(logger, "login_form_visible", status="success", component="session")
+        return
+
+    existing_form = await wait_for_any(
+        page,
+        (LOGIN_EMAIL, LOGIN_PASSWORD),
+        settings=settings,
+        logger=logger,
+        timeout_ms=2000,
+    )
+    if existing_form:
+        log_event(logger, "login_form_visible", status="success", component="session", source="existing_modal")
+        return
+
+    with suppress(Exception):
+        await click(page, ACCOUNT_MENU, settings=settings, logger=logger)
+        log_event(logger, "account_menu_clicked", status="success", component="session")
+
+    await wait_for_any(
+        page,
+        (*AUTH_MARKERS, LOGIN_EMAIL, LOGIN_PASSWORD),
+        settings=settings,
+        logger=logger,
+        timeout_ms=settings.action_timeout_ms,
+    )
+    log_event(logger, "login_form_ready", status="success", component="session")
+
+
+async def _extract_csrf_token(page: Page, cookies: list[dict[str, Any]]) -> str:
+    for selector in CSRF_SELECTORS:
+        locator = page.locator(selector).first
+        with suppress(Exception):
+            if await locator.count():
+                value = await locator.get_attribute("content")
+                if not value:
+                    value = await locator.get_attribute("value")
+                if value:
+                    return value.strip()
+
+    with suppress(Exception):
+        token = await page.evaluate(
+            """() => {
+                const candidates = [
+                    window.csrfToken,
+                    window.CSRF_TOKEN,
+                    window.__csrf,
+                    document.querySelector("meta[name='csrf-token']")?.content,
+                ];
+                return candidates.find((value) => typeof value === "string" && value.trim()) || "";
+            }"""
+        )
+        if token:
+            return str(token).strip()
+
+    for cookie in cookies:
+        name = str(cookie.get("name", "")).lower()
+        if any(marker in name for marker in CSRF_COOKIE_NAMES):
+            value = str(cookie.get("value", "")).strip()
+            if value:
+                return value
+
+    return ""
+
+
+async def _extract_user_id(page: Page) -> str:
+    patterns = (
+        r"/users/(\d{6,})",
+        r"/profile-images/(\d{6,})",
+        r"user_id\s*=\s*['\"](\d{6,})",
+        r"userId\s*[:=]\s*['\"]?(\d{6,})",
+        r'"user(?:_id|Id)"\s*[:=]\s*"?(\\d{6,})',
+        r"data-user-id=['\"](\d{6,})",
+    )
+    with suppress(Exception):
+        return await page.evaluate(
+            """(patterns) => {
+                const html = document.documentElement.outerHTML;
+                for (const source of patterns) {
+                    const regex = new RegExp(source, "i");
+                    const match = html.match(regex);
+                    if (match && match[1]) {
+                        return match[1];
+                    }
+                }
+                return "";
+            }""",
+            list(patterns),
+        )
+    return ""
+
+
+async def open_authenticated_context(
+    settings: Settings | None = None,
+    logger=None,
+    *,
+    headless: bool | None = None,
+) -> AuthenticatedBrowserSession:
+    settings = settings or load_settings()
+    logger = _get_logger(logger)
+
+    playwright = await async_playwright().start()
+    browser = await playwright.chromium.launch(
+        headless=settings.headless if headless is None else headless,
+        slow_mo=settings.slow_mo_ms,
+        args=["--disable-dev-shm-usage"],
+    )
+    context = await browser.new_context(
+        user_agent=settings.user_agent,
+        viewport={"width": settings.viewport_width, "height": settings.viewport_height},
+        locale=settings.locale,
+        timezone_id=settings.timezone,
+    )
+    context.set_default_timeout(settings.action_timeout_ms)
+    context.set_default_navigation_timeout(settings.navigation_timeout_ms)
+    page = await context.new_page()
+
+    try:
+        await page.goto(settings.base_url, wait_until="domcontentloaded", timeout=settings.navigation_timeout_ms)
+        await _dismiss_cookie_banner(page, settings, logger)
+        await ensure_no_captcha(page)
+
+        if not await _is_authenticated(page, settings, logger):
+            await _open_login_form(page, settings, logger)
+            await fill(page, LOGIN_EMAIL, settings.email, settings=settings, logger=logger)
+            await fill(page, LOGIN_PASSWORD, settings.password, settings=settings, logger=logger)
+            log_event(logger, "login_credentials_filled", status="success", component="session")
+
+            remember_me = await resolve_optional(
+                page,
+                REMEMBER_ME,
+                settings=settings,
+                logger=logger,
+                timeout_ms=2000,
+            )
+            if remember_me is not None:
+                with suppress(Exception):
+                    await remember_me.check()
+
+            await click(page, LOGIN_BUTTON, settings=settings, logger=logger)
+            log_event(logger, "login_submitted", status="success", component="session")
+            with suppress(Exception):
+                await page.wait_for_load_state("domcontentloaded", timeout=settings.navigation_timeout_ms)
+
+        await ensure_no_captcha(page)
+
+        if await _is_authenticated(page, settings, logger):
+            log_event(logger, "login_succeeded", status="success", component="session")
+            return AuthenticatedBrowserSession(
+                playwright=playwright,
+                browser=browser,
+                context=context,
+                page=page,
+            )
+
+        raise SessionManagerError(await _extract_login_error(page, settings, logger))
+    except Exception:
+        with suppress(Exception):
+            await page.close()
+        with suppress(Exception):
+            await context.close()
+        with suppress(Exception):
+            await browser.close()
+        with suppress(Exception):
+            await playwright.stop()
+        raise
+
+
+async def login_and_capture_session(
+    settings: Settings | None = None,
+    logger=None,
+    *,
+    headless: bool | None = None,
+) -> SessionData:
+    settings = settings or load_settings()
+    logger = _get_logger(logger)
+    browser_session = await open_authenticated_context(settings=settings, logger=logger, headless=headless)
+    try:
+        cookies = await browser_session.context.cookies()
+        csrf_token = await _extract_csrf_token(browser_session.page, cookies)
+        session = SessionData(
+            cookies=cookies,
+            csrf_token=csrf_token,
+            user_agent=settings.user_agent,
+            captured_at=_utc_now(),
+            access_token=_cookie_value(cookies, "X-Access-Token"),
+            refresh_token=_cookie_value(cookies, "X-Refresh-Token"),
+            client_id=_cookie_value(cookies, "X-Client-Id"),
+            dev_ref_no=_cookie_value(cookies, "X-Dev-Ref-No", "dev_ref_no"),
+            user_id=await _extract_user_id(browser_session.page),
+            login_token=_cookie_value(cookies, "login_token"),
+        )
+        log_event(
+            logger,
+            "session_captured",
+            status="success",
+            component="session",
+            cookie_count=len(cookies),
+            csrf_token_present=bool(csrf_token),
+            user_id_present=bool(session.user_id),
+            access_token_present=bool(session.access_token),
+        )
+        return session
+    finally:
+        await browser_session.close()
+
+
+def save_session(
+    session: SessionData,
+    settings: Settings | None = None,
+    path: Path | None = None,
+) -> Path:
+    resolved_settings = settings or (None if path is not None else load_settings())
+    target = path or resolved_settings.session_file
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = target.with_suffix(".tmp")
+    temporary_path.write_text(json.dumps(asdict(session), ensure_ascii=True, indent=2), encoding="utf-8")
+    temporary_path.replace(target)
+    return target
+
+
+def load_session(settings: Settings | None = None, path: Path | None = None) -> SessionData:
+    resolved_settings = settings or (None if path is not None else load_settings())
+    target = path or resolved_settings.session_file
+    if not target.exists():
+        raise FileNotFoundError(f"Session file not found: {target}")
+
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise SessionManagerError(f"Invalid session payload in {target}")
+
+    cookies = payload.get("cookies")
+    if not isinstance(cookies, list):
+        raise SessionManagerError(f"Session file {target} does not contain a cookie list")
+
+    return SessionData(
+        cookies=cookies,
+        csrf_token=str(payload.get("csrf_token", "")).strip(),
+        user_agent=str(
+            payload.get(
+                "user_agent",
+                getattr(resolved_settings, "user_agent", ""),
+            )
+        ).strip()
+        or getattr(resolved_settings, "user_agent", ""),
+        captured_at=str(payload.get("captured_at", "")),
+        access_token=str(payload.get("access_token", "")).strip(),
+        refresh_token=str(payload.get("refresh_token", "")).strip(),
+        client_id=str(payload.get("client_id", "")).strip(),
+        dev_ref_no=str(payload.get("dev_ref_no", "")).strip(),
+        user_id=str(payload.get("user_id", "")).strip(),
+        login_token=str(payload.get("login_token", "")).strip(),
+    )
+
+
+async def refresh_session(settings: Settings | None = None, logger=None) -> SessionData:
+    settings = settings or load_settings()
+    logger = _get_logger(logger)
+    try:
+        session = await login_and_capture_session(settings=settings, logger=logger)
+        save_session(session, settings=settings)
+        return session
+    except CaptchaDetectedError:
+        raise
+    except Exception as exc:
+        log_event(
+            logger,
+            "session_refresh_failed",
+            status="error",
+            component="session",
+            level=logging.ERROR,
+            error=str(exc),
+        )
+        raise

@@ -1,0 +1,25 @@
+services:
+  wg-bump-bot:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: wg-bump-bot
+    restart: always
+    init: true
+    env_file:
+      - ../.env
+    volumes:
+      - ../auth:/app/auth
+      - ../logs:/app/logs
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import datetime, json, pathlib, sys; p = pathlib.Path('/app/logs/metrics.json'); data = json.loads(p.read_text()) if p.exists() else {}; ts = data.get('last_heartbeat_at'); sys.exit(0 if ts and (datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(ts)).total_seconds() < 900 else 1)",
+        ]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 2m
