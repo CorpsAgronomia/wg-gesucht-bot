@@ -245,7 +245,9 @@ LOGOUT_LINK = SelectorGroup(
 LOGIN_EMAIL = SelectorGroup(
     "login_email",
     (
+        css("#login_email_username"),
         css("#cu_email"),
+        css("input[name='login_email_username']"),
         placeholder("E-Mail-Adresse"),
         css("input[type='email']"),
         css("input[name='email']"),
@@ -255,7 +257,9 @@ LOGIN_EMAIL = SelectorGroup(
 LOGIN_PASSWORD = SelectorGroup(
     "login_password",
     (
+        css("#login_password"),
         css("#cu_password"),
+        css("input[name='login_password']"),
         placeholder("Passwort"),
         css("input[type='password']"),
         css("input[name='password']"),
