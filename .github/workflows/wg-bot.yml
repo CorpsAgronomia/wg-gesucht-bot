@@ -100,6 +100,14 @@ jobs:
         if: steps.random_skip.outputs.should_run != 'true' || steps.night_cooldown.outputs.should_run != 'true'
         run: echo "Workflow finished without running the bot."
 
+      - name: Restore authenticated session
+        if: steps.random_skip.outputs.should_run == 'true' && steps.night_cooldown.outputs.should_run == 'true' && secrets.WG_SESSION_JSON != ''
+        run: |
+          mkdir -p auth
+          printf '%s' "$WG_SESSION_JSON" > auth/session.json
+        env:
+          WG_SESSION_JSON: ${{ secrets.WG_SESSION_JSON }}
+
       - name: Run WG Bot
         if: steps.random_skip.outputs.should_run == 'true' && steps.night_cooldown.outputs.should_run == 'true'
         run: RUN_ONCE=true python main.py
