@@ -42,6 +42,10 @@ def placeholder(value) -> LocatorFactory:
     return lambda scope: scope.get_by_placeholder(value)
 
 
+def label(value, *, exact: bool = False) -> LocatorFactory:
+    return lambda scope: scope.get_by_label(value, exact=exact)
+
+
 def has_text_selector(selector: str, value: str) -> LocatorFactory:
     return lambda scope: scope.locator(selector).filter(has_text=value)
 
@@ -248,6 +252,7 @@ LOGIN_EMAIL = SelectorGroup(
         css("#login_email_username"),
         css("#cu_email"),
         css("input[name='login_email_username']"),
+        label(re.compile(r"E-?Mail", re.IGNORECASE)),
         placeholder("E-Mail-Adresse"),
         css("input[type='email']"),
         css("input[name='email']"),
@@ -260,6 +265,7 @@ LOGIN_PASSWORD = SelectorGroup(
         css("#login_password"),
         css("#cu_password"),
         css("input[name='login_password']"),
+        label(re.compile(r"Passwort", re.IGNORECASE)),
         placeholder("Passwort"),
         css("input[type='password']"),
         css("input[name='password']"),
@@ -278,6 +284,7 @@ LOGIN_BUTTON = SelectorGroup(
 REMEMBER_ME = SelectorGroup(
     "remember_me",
     (
+        label(re.compile(r"Angemeldet bleiben", re.IGNORECASE)),
         role("checkbox", re.compile(r"Angemeldet bleiben", re.IGNORECASE)),
         text(re.compile(r"Angemeldet bleiben", re.IGNORECASE)),
         css("input[type='checkbox']"),

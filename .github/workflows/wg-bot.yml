@@ -122,5 +122,24 @@ jobs:
           LISTING_IDS: ${{ secrets.LISTING_IDS }}
           HEADLESS: "true"
           DRY_RUN: "false"
+          REFRESH_SESSION_ON_START: "true"
           TIMEZONE: "Europe/Berlin"
           PYTHONUNBUFFERED: "1"
+
+      - name: Persist refreshed session
+        if: always() && steps.random_skip.outputs.should_run == 'true' && steps.night_cooldown.outputs.should_run == 'true'
+        run: |
+          if [ ! -f auth/session.json ]; then
+            echo "auth/session.json not found; skipping sync"
+            exit 0
+          fi
+
+          if [ -z "$GH_TOKEN" ]; then
+            echo "WG_SESSION_SYNC_TOKEN not set; skipping sync"
+            exit 0
+          fi
+
+          gh secret set WG_SESSION_JSON --repo "$GITHUB_REPOSITORY" < auth/session.json
+          echo "Updated WG_SESSION_JSON secret"
+        env:
+          GH_TOKEN: ${{ secrets.WG_SESSION_SYNC_TOKEN }}

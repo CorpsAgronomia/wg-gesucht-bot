@@ -66,6 +66,7 @@ class Settings:
     validation_report_path: Path
     request_timeout_seconds: int
     dry_run: bool
+    refresh_session_on_start: bool
     validation_cycles: int
     validation_sleep_seconds: int
     telegram_bot_token: str
@@ -129,6 +130,7 @@ def load_settings() -> Settings:
         ),
         request_timeout_seconds=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10")),
         dry_run=_get_bool("DRY_RUN", True),
+        refresh_session_on_start=_get_bool("REFRESH_SESSION_ON_START", False),
         validation_cycles=int(os.getenv("VALIDATION_CYCLES", "10")),
         validation_sleep_seconds=int(os.getenv("VALIDATION_SLEEP_SECONDS", "60")),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
+from playwright.async_api import Browser, BrowserContext, Locator, Page, Playwright, async_playwright
 
 from bot.captcha_detector import CaptchaDetectedError, ensure_no_captcha
 from bot.config import Settings, load_settings
@@ -27,7 +27,6 @@ from bot.selectors import (
     click,
     click_optional,
     fill,
-    is_visible,
     resolve_optional,
     wait_for_any,
 )
@@ -86,6 +85,10 @@ class AuthenticatedBrowserSession:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _timestamp_slug() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def _get_logger(logger):
@@ -157,6 +160,16 @@ async def _dismiss_cookie_banner(page: Page, settings: Settings, logger) -> None
         log_event(logger, "cookie_banner_dismissed", status="success", component="session")
 
 
+async def _capture_debug_screenshot(page: Page, settings: Settings, prefix: str) -> str | None:
+    settings.screenshots_dir.mkdir(parents=True, exist_ok=True)
+    path = settings.screenshots_dir / f"{prefix}_{_timestamp_slug()}.png"
+    try:
+        await page.screenshot(path=str(path), full_page=True)
+    except Exception:
+        return None
+    return str(path)
+
+
 async def _is_authenticated(page: Page, settings: Settings, logger) -> bool:
     if await wait_for_any(page, AUTH_MARKERS, settings=settings, logger=logger, timeout_ms=2500):
         return True
@@ -186,34 +199,61 @@ async def _extract_login_error(page: Page, settings: Settings, logger) -> str:
     return text or "Login did not complete successfully."
 
 
-async def _open_login_form(page: Page, settings: Settings, logger) -> None:
-    if await is_visible(page, LOGIN_EMAIL, settings=settings, logger=logger, timeout_ms=2000):
-        log_event(logger, "login_form_visible", status="success", component="session")
-        return
+async def _resolve_login_fields(page: Page, settings: Settings, logger, *, timeout_ms: int) -> tuple[Locator, Locator] | None:
+    email = await resolve_optional(page, LOGIN_EMAIL, settings=settings, logger=logger, timeout_ms=timeout_ms)
+    password = await resolve_optional(page, LOGIN_PASSWORD, settings=settings, logger=logger, timeout_ms=timeout_ms)
+    if email is None or password is None:
+        return None
+    return email, password
 
-    existing_form = await wait_for_any(
-        page,
-        (LOGIN_EMAIL, LOGIN_PASSWORD),
-        settings=settings,
-        logger=logger,
-        timeout_ms=2000,
-    )
-    if existing_form:
-        log_event(logger, "login_form_visible", status="success", component="session", source="existing_modal")
-        return
 
-    with suppress(Exception):
-        await click(page, ACCOUNT_MENU, settings=settings, logger=logger)
-        log_event(logger, "account_menu_clicked", status="success", component="session")
+async def _open_login_form(page: Page, settings: Settings, logger) -> bool:
+    existing_fields = await _resolve_login_fields(page, settings, logger, timeout_ms=2000)
+    if existing_fields is not None:
+        log_event(logger, "login_form_visible", status="success", component="session", source="already_open")
+        return True
 
-    await wait_for_any(
-        page,
-        (*AUTH_MARKERS, LOGIN_EMAIL, LOGIN_PASSWORD),
-        settings=settings,
-        logger=logger,
-        timeout_ms=settings.action_timeout_ms,
-    )
-    log_event(logger, "login_form_ready", status="success", component="session")
+    for attempt in range(1, 3):
+        with suppress(Exception):
+            await click(page, ACCOUNT_MENU, settings=settings, logger=logger)
+            log_event(
+                logger,
+                "account_menu_clicked",
+                status="success",
+                component="session",
+                attempt=attempt,
+            )
+
+        match = await wait_for_any(
+            page,
+            (*AUTH_MARKERS, LOGIN_EMAIL, LOGIN_PASSWORD),
+            settings=settings,
+            logger=logger,
+            timeout_ms=settings.action_timeout_ms,
+        )
+        if match and match[0].name in {MY_LISTINGS.name, LOGOUT_LINK.name}:
+            log_event(
+                logger,
+                "session_reused",
+                status="success",
+                component="session",
+                source="account_menu",
+                attempt=attempt,
+            )
+            return False
+
+        fields = await _resolve_login_fields(page, settings, logger, timeout_ms=2000)
+        if fields is not None:
+            log_event(
+                logger,
+                "login_form_ready",
+                status="success",
+                component="session",
+                attempt=attempt,
+            )
+            return True
+
+    raise SessionManagerError("Login form did not expose both email and password fields.")
 
 
 async def _extract_csrf_token(page: Page, cookies: list[dict[str, Any]]) -> str:
@@ -310,26 +350,27 @@ async def open_authenticated_context(
         await ensure_no_captcha(page)
 
         if not await _is_authenticated(page, settings, logger):
-            await _open_login_form(page, settings, logger)
-            await fill(page, LOGIN_EMAIL, settings.email, settings=settings, logger=logger)
-            await fill(page, LOGIN_PASSWORD, settings.password, settings=settings, logger=logger)
-            log_event(logger, "login_credentials_filled", status="success", component="session")
+            login_required = await _open_login_form(page, settings, logger)
+            if login_required and not await _is_authenticated(page, settings, logger):
+                await fill(page, LOGIN_EMAIL, settings.email, settings=settings, logger=logger)
+                await fill(page, LOGIN_PASSWORD, settings.password, settings=settings, logger=logger)
+                log_event(logger, "login_credentials_filled", status="success", component="session")
 
-            remember_me = await resolve_optional(
-                page,
-                REMEMBER_ME,
-                settings=settings,
-                logger=logger,
-                timeout_ms=2000,
-            )
-            if remember_me is not None:
+                remember_me = await resolve_optional(
+                    page,
+                    REMEMBER_ME,
+                    settings=settings,
+                    logger=logger,
+                    timeout_ms=2000,
+                )
+                if remember_me is not None:
+                    with suppress(Exception):
+                        await remember_me.check()
+
+                await click(page, LOGIN_BUTTON, settings=settings, logger=logger)
+                log_event(logger, "login_submitted", status="success", component="session")
                 with suppress(Exception):
-                    await remember_me.check()
-
-            await click(page, LOGIN_BUTTON, settings=settings, logger=logger)
-            log_event(logger, "login_submitted", status="success", component="session")
-            with suppress(Exception):
-                await page.wait_for_load_state("domcontentloaded", timeout=settings.navigation_timeout_ms)
+                    await page.wait_for_load_state("domcontentloaded", timeout=settings.navigation_timeout_ms)
 
         await ensure_no_captcha(page)
 
@@ -343,7 +384,17 @@ async def open_authenticated_context(
             )
 
         raise SessionManagerError(await _extract_login_error(page, settings, logger))
-    except Exception:
+    except Exception as exc:
+        screenshot = await _capture_debug_screenshot(page, settings, "session_failure")
+        log_event(
+            logger,
+            "session_browser_flow_failed",
+            status="error",
+            component="session",
+            level=logging.ERROR,
+            error=str(exc),
+            screenshot=screenshot,
+        )
         with suppress(Exception):
             await page.close()
         with suppress(Exception):
