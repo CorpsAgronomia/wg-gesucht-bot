@@ -43,8 +43,10 @@ CSRF_SELECTORS = (
     "input[name='csrf_token']",
     "input[name='xsrf_token']",
 )
-REFRESH_SESSION_URL = "https://www.wg-gesucht.de/ajax/sessions.php?action=refresh"
+REFRESH_SESSION_URL = "https://www.wg-gesucht.de/ajax/sessions.php?action=refresh_tokens"
+LOGIN_URL = "https://www.wg-gesucht.de/ajax/sessions.php?action=login"
 DEFAULT_CLIENT_ID = "wg_desktop_website"
+DEFAULT_SMP_CLIENT = "WG-Gesucht"
 
 
 class SessionManagerError(RuntimeError):
@@ -140,19 +142,53 @@ def _serialize_cookies(cookies: httpx.Cookies) -> list[dict[str, Any]]:
 
 
 def _parse_refresh_payload(response: httpx.Response) -> dict[str, Any]:
+    body = response.text.strip()
+    if not body:
+        return {}
+
     try:
-        payload = json.loads(response.text)
+        payload = json.loads(body)
     except json.JSONDecodeError as exc:
         raise SessionManagerError("Token refresh returned an invalid response body.") from exc
 
     if not isinstance(payload, dict):
         raise SessionManagerError("Token refresh returned an invalid payload.")
 
+    if payload.get("detail") is None:
+        return payload
+
     detail = payload.get("detail")
     if not isinstance(detail, dict):
         raise SessionManagerError("Token refresh response is missing detail data.")
 
     return detail
+
+
+def _build_api_headers(
+    *,
+    user_agent: str,
+    client_id: str,
+    access_token: str = "",
+    dev_ref_no: str = "",
+    user_id: str = "",
+    referer: str,
+) -> dict[str, str]:
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Referer": referer,
+        "User-Agent": user_agent,
+        "X-Client-Id": client_id or DEFAULT_CLIENT_ID,
+        "X-Requested-With": "XMLHttpRequest",
+        "X-Smp-Client": DEFAULT_SMP_CLIENT,
+    }
+    if access_token:
+        headers["X-Authorization"] = f"Bearer {access_token}"
+    if dev_ref_no:
+        headers["X-Dev-Ref-No"] = dev_ref_no
+    if user_id:
+        headers["X-User-Id"] = user_id
+    return headers
 
 
 async def _dismiss_cookie_banner(page: Page, settings: Settings, logger) -> None:
@@ -445,6 +481,91 @@ async def login_and_capture_session(
         await browser_session.close()
 
 
+async def login_via_api(
+    *,
+    settings: Settings,
+    logger,
+) -> SessionData:
+    async with httpx.AsyncClient(
+        timeout=settings.request_timeout_seconds,
+        follow_redirects=True,
+        headers={"User-Agent": settings.user_agent},
+    ) as client:
+        bootstrap_response = await client.get(settings.base_url)
+        if bootstrap_response.status_code >= 400:
+            raise SessionManagerError(f"Failed to bootstrap WG-Gesucht session with HTTP {bootstrap_response.status_code}.")
+
+        client_id = client.cookies.get("X-Client-Id") or DEFAULT_CLIENT_ID
+        dev_ref_no = client.cookies.get("X-Dev-Ref-No") or client.cookies.get("dev_ref_no") or ""
+        access_token = client.cookies.get("X-Access-Token") or ""
+        headers = _build_api_headers(
+            user_agent=settings.user_agent,
+            client_id=client_id,
+            access_token=access_token,
+            dev_ref_no=dev_ref_no,
+            referer=settings.base_url,
+        )
+        payload = {
+            "login_email_username": settings.email,
+            "login_password": settings.password,
+            "login_form_auto_login": "1",
+            "csrf_token": "",
+        }
+        response = await client.post(
+            LOGIN_URL,
+            headers=headers,
+            content=json.dumps(payload),
+        )
+
+        if response.status_code == 202:
+            raise SessionManagerError("Two-factor authentication is required for this account.")
+        if response.status_code in {400, 401}:
+            raise SessionManagerError("WG-Gesucht rejected the supplied login credentials.")
+        if response.status_code >= 400:
+            raise SessionManagerError(f"API login failed with HTTP {response.status_code}.")
+
+        try:
+            detail = json.loads(response.text or "{}")
+        except json.JSONDecodeError as exc:
+            raise SessionManagerError("API login returned an invalid response body.") from exc
+
+        if not isinstance(detail, dict):
+            raise SessionManagerError("API login returned an invalid payload.")
+
+        cookies = _serialize_cookies(client.cookies)
+        session = SessionData(
+            cookies=cookies,
+            csrf_token=str(detail.get("csrf_token", "")).strip(),
+            user_agent=settings.user_agent,
+            captured_at=_utc_now(),
+            access_token=str(detail.get("access_token", "")).strip()
+            or _cookie_value(cookies, "X-Access-Token"),
+            refresh_token=str(detail.get("refresh_token", "")).strip()
+            or _cookie_value(cookies, "X-Refresh-Token"),
+            client_id=client_id,
+            dev_ref_no=str(detail.get("dev_ref_no", "")).strip()
+            or _cookie_value(cookies, "X-Dev-Ref-No", "dev_ref_no"),
+            user_id=str(detail.get("user_id", "")).strip(),
+            login_token=_cookie_value(cookies, "login_token"),
+        )
+
+    if not session.access_token or not session.refresh_token or not session.user_id:
+        raise SessionManagerError("API login did not return usable session tokens.")
+
+    log_event(
+        logger,
+        "login_succeeded",
+        status="success",
+        component="session",
+        method="api",
+        cookie_count=len(session.cookies),
+        csrf_token_present=bool(session.csrf_token),
+        user_id_present=bool(session.user_id),
+        access_token_present=bool(session.access_token),
+    )
+    return session
+
+
 async def refresh_session_via_api(
     session: SessionData,
     *,
@@ -568,6 +689,11 @@ async def refresh_session(settings: Settings | None = None, logger=None) -> Sess
         with suppress(FileNotFoundError, SessionManagerError):
             existing_session = load_session(settings=settings)
             session = await refresh_session_via_api(existing_session, settings=settings, logger=logger)
+            save_session(session, settings=settings)
+            return session
+
+        with suppress(SessionManagerError):
+            session = await login_via_api(settings=settings, logger=logger)
             save_session(session, settings=settings)
             return session
 
