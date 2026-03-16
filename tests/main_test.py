@@ -52,6 +52,37 @@ class EnsureSessionTest(unittest.IsolatedAsyncioTestCase):
         save_session.assert_not_called()
         alerts.notify_login_failed.assert_not_awaited()
 
+    async def test_forced_refresh_prefers_api_login(self) -> None:
+        settings = SimpleNamespace(refresh_session_on_start=True)
+        alerts = SimpleNamespace(notify_login_failed=AsyncMock())
+        logger = logging.getLogger("test")
+        session = SessionData(
+            cookies=[{"name": "sessionid", "value": "abc", "domain": ".wg-gesucht.de", "path": "/"}],
+            csrf_token="csrf-token",
+            user_agent="UnitTestAgent/1.0",
+            captured_at="2026-03-13T00:00:00+00:00",
+            access_token="access-token",
+            refresh_token="refresh-token",
+            client_id="client-id",
+            dev_ref_no="dev-ref",
+            user_id="12345678",
+            login_token="login-token",
+        )
+
+        with (
+            patch("main.load_session", return_value=session),
+            patch("main.refresh_session_via_api", new=AsyncMock()) as refresh_via_api,
+            patch("main.refresh_session", new=AsyncMock()) as refresh_session,
+        ):
+            await main._ensure_session(settings, logger, alerts, force_refresh=True)
+
+        refresh_via_api.assert_not_awaited()
+        refresh_session.assert_awaited_once_with(
+            settings=settings,
+            logger=logger,
+            prefer_login=True,
+        )
+
 
 class RunOnceTest(unittest.IsolatedAsyncioTestCase):
     def _settings(self, temp_dir: str) -> SimpleNamespace:

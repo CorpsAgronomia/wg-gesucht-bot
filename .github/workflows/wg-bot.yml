@@ -20,42 +20,57 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Install Chromium
-        run: python -m playwright install --with-deps chromium
-
       - name: Random skip
         id: random_skip
         run: |
           python - <<'PY'
+          from datetime import datetime, timezone
           import os
           import random
           import sys
 
           event_name = os.environ["GITHUB_EVENT_NAME"]
+          force_run_after_minutes = float(os.environ.get("FORCE_RUN_AFTER_MINUTES", "30"))
+          random_run_probability = float(os.environ.get("RANDOM_RUN_PROBABILITY", "0.05"))
+          last_success_raw = os.environ.get("WG_LAST_SUCCESS_AT", "").strip()
           should_run = True
+          gate_reason = "Manual dispatch"
 
-          if event_name == "schedule" and random.random() > 0.33:
-              should_run = False
+          if event_name == "schedule":
+              if not last_success_raw:
+                  gate_reason = "No successful bump recorded yet"
+              else:
+                  try:
+                      last_success = datetime.fromisoformat(last_success_raw.replace("Z", "+00:00"))
+                  except ValueError:
+                      gate_reason = f"Invalid WG_LAST_SUCCESS_AT value: {last_success_raw!r}"
+                  else:
+                      age_minutes = (datetime.now(timezone.utc) - last_success).total_seconds() / 60
+                      if age_minutes >= force_run_after_minutes:
+                          gate_reason = f"Overdue after {age_minutes:.1f} minutes"
+                      elif random.random() <= random_run_probability:
+                          gate_reason = f"Random pass after {age_minutes:.1f} minutes"
+                      else:
+                          should_run = False
+                          gate_reason = f"Random skip after {age_minutes:.1f} minutes"
+
+          if not should_run:
               print("Skipping run")
           else:
               print("Continuing execution")
+          print(gate_reason)
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
               handle.write(f"should_run={'true' if should_run else 'false'}\n")
+              handle.write(f"gate_reason={gate_reason}\n")
 
           if not should_run:
               sys.exit(0)
           PY
+        env:
+          WG_LAST_SUCCESS_AT: ${{ vars.WG_LAST_SUCCESS_AT }}
+          FORCE_RUN_AFTER_MINUTES: "30"
+          RANDOM_RUN_PROBABILITY: "0.05"
 
       - name: Night cooldown
         if: steps.random_skip.outputs.should_run == 'true'
@@ -84,6 +99,30 @@ jobs:
               sys.exit(0)
           PY
 
+      - name: Run skipped summary
+        if: steps.random_skip.outputs.should_run != 'true' || steps.night_cooldown.outputs.should_run != 'true'
+        run: |
+          echo "Workflow finished without running the bot."
+          echo "Gate reason: $GATE_REASON"
+        env:
+          GATE_REASON: ${{ steps.random_skip.outputs.gate_reason }}
+
+      - name: Setup Python
+        if: steps.random_skip.outputs.should_run == 'true' && steps.night_cooldown.outputs.should_run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        if: steps.random_skip.outputs.should_run == 'true' && steps.night_cooldown.outputs.should_run == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Chromium
+        if: steps.random_skip.outputs.should_run == 'true' && steps.night_cooldown.outputs.should_run == 'true'
+        run: python -m playwright install --with-deps chromium
+
       - name: Random delay
         if: steps.random_skip.outputs.should_run == 'true' && steps.night_cooldown.outputs.should_run == 'true' && github.event_name == 'schedule'
         run: |
@@ -95,10 +134,6 @@ jobs:
           print(f"Sleeping {delay} seconds")
           time.sleep(delay)
           PY
-
-      - name: Run skipped summary
-        if: steps.random_skip.outputs.should_run != 'true' || steps.night_cooldown.outputs.should_run != 'true'
-        run: echo "Workflow finished without running the bot."
 
       - name: Restore authenticated session
         if: steps.random_skip.outputs.should_run == 'true' && steps.night_cooldown.outputs.should_run == 'true'
@@ -125,6 +160,20 @@ jobs:
           REFRESH_SESSION_ON_START: "true"
           TIMEZONE: "Europe/Berlin"
           PYTHONUNBUFFERED: "1"
+
+      - name: Record successful bump time
+        if: success() && steps.random_skip.outputs.should_run == 'true' && steps.night_cooldown.outputs.should_run == 'true'
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "WG_SESSION_SYNC_TOKEN not set; skipping last-success update"
+            exit 0
+          fi
+
+          recorded_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh variable set WG_LAST_SUCCESS_AT --repo "$GITHUB_REPOSITORY" --body "$recorded_at"
+          echo "Recorded successful bump at $recorded_at"
+        env:
+          GH_TOKEN: ${{ secrets.WG_SESSION_SYNC_TOKEN }}
 
       - name: Persist refreshed session
         if: always() && steps.random_skip.outputs.should_run == 'true' && steps.night_cooldown.outputs.should_run == 'true'

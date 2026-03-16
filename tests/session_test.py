@@ -10,7 +10,15 @@ from unittest.mock import patch
 
 import httpx
 
-from bot.session_manager import SessionData, SessionManagerError, load_session, login_via_api, refresh_session_via_api, save_session
+from bot.session_manager import (
+    SessionData,
+    SessionManagerError,
+    load_session,
+    login_via_api,
+    refresh_session,
+    refresh_session_via_api,
+    save_session,
+)
 
 
 class SessionManagerTest(unittest.TestCase):
@@ -226,6 +234,48 @@ class SessionLoginApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.dev_ref_no, "new-dev-ref")
         self.assertEqual(session.csrf_token, "new-csrf")
         self.assertEqual(session.login_token, "new-login")
+
+
+class SessionRefreshStrategyTest(unittest.IsolatedAsyncioTestCase):
+    async def test_refresh_session_prefers_api_login_when_requested(self) -> None:
+        settings = SimpleNamespace(request_timeout_seconds=10, user_agent="UnitTestAgent/1.0")
+        existing_session = SessionData(
+            cookies=[{"name": "sessionid", "value": "abc", "domain": ".wg-gesucht.de", "path": "/"}],
+            csrf_token="csrf-token",
+            user_agent="UnitTestAgent/1.0",
+            captured_at="2026-03-12T00:00:00+00:00",
+            access_token="access-token",
+            refresh_token="refresh-token",
+            client_id="client-id",
+            dev_ref_no="dev-ref",
+            user_id="12345678",
+            login_token="login-token",
+        )
+        refreshed_session = SessionData(
+            cookies=[{"name": "sessionid", "value": "new", "domain": ".wg-gesucht.de", "path": "/"}],
+            csrf_token="new-csrf-token",
+            user_agent="UnitTestAgent/1.0",
+            captured_at="2026-03-12T00:05:00+00:00",
+            access_token="new-access-token",
+            refresh_token="new-refresh-token",
+            client_id="client-id",
+            dev_ref_no="new-dev-ref",
+            user_id="12345678",
+            login_token="new-login-token",
+        )
+
+        with (
+            patch("bot.session_manager.load_session", return_value=existing_session),
+            patch("bot.session_manager.login_via_api", new=unittest.mock.AsyncMock(return_value=refreshed_session)) as login_via_api_mock,
+            patch("bot.session_manager.refresh_session_via_api", new=unittest.mock.AsyncMock()) as refresh_via_api_mock,
+            patch("bot.session_manager.save_session") as save_session_mock,
+        ):
+            session = await refresh_session(settings=settings, logger=logging.getLogger("test"), prefer_login=True)
+
+        self.assertIs(session, refreshed_session)
+        login_via_api_mock.assert_awaited_once()
+        refresh_via_api_mock.assert_not_awaited()
+        save_session_mock.assert_called_once_with(refreshed_session, settings=settings)
 
 
 if __name__ == "__main__":

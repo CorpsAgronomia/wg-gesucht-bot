@@ -682,10 +682,21 @@ def load_session(settings: Settings | None = None, path: Path | None = None) -> 
     )
 
 
-async def refresh_session(settings: Settings | None = None, logger=None) -> SessionData:
+async def refresh_session(
+    settings: Settings | None = None,
+    logger=None,
+    *,
+    prefer_login: bool = False,
+) -> SessionData:
     settings = settings or load_settings()
     logger = _get_logger(logger)
     try:
+        if prefer_login:
+            with suppress(SessionManagerError):
+                session = await login_via_api(settings=settings, logger=logger)
+                save_session(session, settings=settings)
+                return session
+
         with suppress(FileNotFoundError, SessionManagerError):
             existing_session = load_session(settings=settings)
             session = await refresh_session_via_api(existing_session, settings=settings, logger=logger)

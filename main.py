@@ -92,7 +92,11 @@ async def _ensure_session(settings, logger, alerts: AlertManager, *, force_refre
             )
             return
 
-        await refresh_session(settings=settings, logger=logger)
+        await refresh_session(
+            settings=settings,
+            logger=logger,
+            prefer_login=force_refresh,
+        )
         log_event(
             logger,
             "session_ready",
