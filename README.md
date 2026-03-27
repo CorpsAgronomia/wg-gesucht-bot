@@ -64,6 +64,7 @@ Important runtime options:
 
 ```dotenv
 DRY_RUN=true
+UPDATE_STRATEGY=browser
 REQUEST_TIMEOUT_SECONDS=10
 UPDATE_REQUEST_TEMPLATE_FILE=discovery/update_request_template.json
 UPDATE_REQUEST_TEMPLATES_DIR=discovery/update_request_templates
@@ -74,7 +75,9 @@ MIN_DELAY=7200
 MAX_DELAY=14400
 ```
 
-`DRY_RUN=true` is the safe default. The request is rendered and logged but not sent until you explicitly set `DRY_RUN=false`.
+`DRY_RUN=true` is the safe default. With `UPDATE_STRATEGY=browser`, the bot opens the listing editor and verifies the update flow without submitting it. With `UPDATE_STRATEGY=request`, the captured request is rendered and logged but not sent until you explicitly set `DRY_RUN=false`.
+
+`UPDATE_STRATEGY=browser` is now the safe default for live updates. It opens the current listing editor and clicks `Aktualisieren und Ansehen`, so the site submits the current listing values instead of replaying the stale captured payload. Set `UPDATE_STRATEGY=request` only if you explicitly want the old request-replay behavior.
 
 ## Setup
 
@@ -155,9 +158,9 @@ Then run the bot:
 Flow:
 
 1. Load `auth/session.json`.
-2. Refresh the session only when missing or invalid.
-3. Load `discovery/update_request_template.json`.
-4. Call `bump_listing(listing_id)`.
+2. If `UPDATE_STRATEGY=request`, refresh the API session only when missing or invalid.
+3. If `UPDATE_STRATEGY=browser`, open the editor and click `Aktualisieren und Ansehen`.
+4. If `UPDATE_STRATEGY=request`, load `discovery/update_request_template.json` and replay the captured request.
 5. Write metrics to `logs/metrics.json`.
 6. Sleep for a random delay between 7200 and 14400 seconds.
 

@@ -4,8 +4,10 @@ import logging
 import re
 from contextlib import suppress
 from dataclasses import dataclass
+from time import perf_counter
 
 from bot.captcha_detector import CaptchaDetectedError, ensure_no_captcha
+from bot.config import Settings, load_settings
 from bot.logger import log_event
 from bot.retry import build_async_retry
 from bot.selectors import (
@@ -21,6 +23,7 @@ from bot.selectors import (
     resolve,
     resolve_optional,
 )
+from bot.session_manager import SessionManagerError, open_authenticated_context
 
 
 @dataclass(slots=True, frozen=True)
@@ -33,15 +36,24 @@ class ListingUpdateError(RuntimeError):
     pass
 
 
+@dataclass(slots=True, frozen=True)
+class BrowserBumpOutcome:
+    listing_id: str
+    success: bool
+    attempts: int
+    status_code: int | None
+    latency_ms: float | None
+    reason: str
+    dry_run: bool
+
+
 def _sanitize_target(target: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", target).strip("_")
     return normalized or "listing"
 
 
-async def navigate_to_my_listings(browser, settings, logger):
-    page = await browser.goto(settings.base_url, load_session=True)
+async def _open_my_listings(page, settings, logger) -> None:
     await ensure_no_captcha(page)
-
     my_listings = await resolve_optional(
         page,
         MY_LISTINGS,
@@ -68,6 +80,11 @@ async def navigate_to_my_listings(browser, settings, logger):
         )
     else:
         log_event(logger, "my_listings_opened", status="success", component="bump_listing")
+
+
+async def navigate_to_my_listings(browser, settings, logger):
+    page = await browser.goto(settings.base_url, load_session=True)
+    await _open_my_listings(page, settings, logger)
     return page
 
 
@@ -234,3 +251,65 @@ async def bump_targets(browser, settings, logger) -> BumpResult:
         failed_targets=failed_targets,
     )
     return BumpResult(tuple(successful_targets), tuple(failed_targets))
+
+
+async def bump_listing_via_browser(
+    listing_id: str,
+    *,
+    settings: Settings | None = None,
+    logger=None,
+) -> BrowserBumpOutcome:
+    settings = settings or load_settings()
+    logger = logger or logging.getLogger("wg_bump_bot")
+    retrying = build_async_retry(
+        settings,
+        attempts=min(settings.retry_attempts, 5),
+        excluded_exceptions=(CaptchaDetectedError, SessionManagerError),
+    )
+
+    async for attempt in retrying:
+        with attempt:
+            started_at = perf_counter()
+            browser_session = await open_authenticated_context(settings=settings, logger=logger)
+            try:
+                await _open_my_listings(browser_session.page, settings, logger)
+                await open_listing_editor(browser_session.page, settings, logger, listing_id)
+                if settings.dry_run:
+                    reason = "Dry run confirmed the update flow without submitting the listing."
+                    log_event(
+                        logger,
+                        "listing_update_dry_run",
+                        status="success",
+                        component="bump_listing",
+                        listing_id=listing_id,
+                    )
+                else:
+                    await submit_listing_update(browser_session.page, settings, logger, listing_id)
+                    reason = "Listing updated through the browser flow."
+
+                latency_ms = (perf_counter() - started_at) * 1000
+                return BrowserBumpOutcome(
+                    listing_id=listing_id,
+                    success=True,
+                    attempts=attempt.retry_state.attempt_number,
+                    status_code=None,
+                    latency_ms=latency_ms,
+                    reason=reason,
+                    dry_run=settings.dry_run,
+                )
+            except Exception as exc:
+                log_event(
+                    logger,
+                    "listing_bump_attempt_failed",
+                    status="retrying",
+                    component="bump_listing",
+                    level=logging.ERROR,
+                    error=str(exc),
+                    target=listing_id,
+                    attempt=attempt.retry_state.attempt_number,
+                )
+                raise
+            finally:
+                await browser_session.close()
+
+    raise ListingUpdateError(f"Failed to update listing '{listing_id}'.")

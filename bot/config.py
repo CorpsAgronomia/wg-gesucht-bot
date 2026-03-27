@@ -13,6 +13,7 @@ HEADLESS = False
 MIN_DELAY = 7200
 MAX_DELAY = 14400
 RETRY_ATTEMPTS = 5
+UPDATE_STRATEGY = "browser"
 
 
 def _get_bool(name: str, default: bool) -> bool:
@@ -34,6 +35,7 @@ class Settings:
     listing_title: str
     listing_ids: tuple[str, ...]
     listing_targets: tuple[str, ...]
+    update_strategy: str
     headless: bool
     min_delay: int
     max_delay: int
@@ -88,6 +90,7 @@ def load_settings() -> Settings:
         listing_title=listing_title,
         listing_ids=listing_ids,
         listing_targets=listing_targets,
+        update_strategy=(os.getenv("UPDATE_STRATEGY", UPDATE_STRATEGY).strip().lower() or UPDATE_STRATEGY),
         headless=_get_bool("HEADLESS", HEADLESS),
         min_delay=int(os.getenv("MIN_DELAY", str(MIN_DELAY))),
         max_delay=int(os.getenv("MAX_DELAY", str(MAX_DELAY))),
@@ -156,6 +159,8 @@ def load_settings() -> Settings:
         raise ValueError("MIN_DELAY must be less than or equal to MAX_DELAY.")
     if settings.retry_attempts <= 0:
         raise ValueError("RETRY_ATTEMPTS must be positive.")
+    if settings.update_strategy not in {"browser", "request"}:
+        raise ValueError("UPDATE_STRATEGY must be either 'browser' or 'request'.")
     if settings.request_timeout_seconds <= 0:
         raise ValueError("REQUEST_TIMEOUT_SECONDS must be positive.")
     if settings.validation_cycles <= 0:

@@ -8,6 +8,7 @@ import signal
 
 from bot.alerts import AlertManager
 from bot.bump_api import BumpFailedError, SessionRefreshRequiredError, bump_listing
+from bot.bump_listing import bump_listing_via_browser
 from bot.captcha_detector import CaptchaDetectedError
 from bot.config import load_settings, prepare_runtime
 from bot.logger import configure_logging, log_event, shutdown_logging
@@ -128,6 +129,22 @@ async def _bump_with_session_refresh(listing_id: str, *, settings, logger, alert
         return await bump_listing(listing_id, settings=settings, logger=logger, metrics=metrics)
 
 
+def _update_strategy(settings) -> str:
+    return str(getattr(settings, "update_strategy", "browser")).strip().lower() or "browser"
+
+
+async def _update_listing(listing_id: str, *, settings, logger, alerts, metrics: MetricsStore):
+    if _update_strategy(settings) == "browser":
+        return await bump_listing_via_browser(listing_id, settings=settings, logger=logger)
+    return await _bump_with_session_refresh(
+        listing_id,
+        settings=settings,
+        logger=logger,
+        alerts=alerts,
+        metrics=metrics,
+    )
+
+
 def _get_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -164,16 +181,18 @@ async def _run_cycle(
         cycle=cycle_number,
         listing_ids=list(settings.listing_ids),
         dry_run=settings.dry_run,
+        update_strategy=_update_strategy(settings),
     )
 
     cycle_outcome = CycleOutcome()
-    await _ensure_session(settings, logger, alerts)
+    if _update_strategy(settings) == "request":
+        await _ensure_session(settings, logger, alerts)
     for listing_id in settings.listing_ids:
         if stop_event.is_set():
             break
 
         try:
-            bump_outcome = await _bump_with_session_refresh(
+            bump_outcome = await _update_listing(
                 listing_id,
                 settings=settings,
                 logger=logger,

@@ -18,6 +18,12 @@ class _FakeMetrics:
     def record_heartbeat(self, **_kwargs) -> None:
         return None
 
+    def record_success(self, _latency_ms) -> None:
+        return None
+
+    def record_failure(self) -> None:
+        return None
+
 
 class EnsureSessionTest(unittest.IsolatedAsyncioTestCase):
     async def test_startup_refresh_failure_reuses_existing_session(self) -> None:
@@ -139,6 +145,73 @@ class RunOnceTest(unittest.IsolatedAsyncioTestCase):
                 await main.run_once()
 
         run_cycle.assert_awaited_once()
+
+
+class UpdateStrategyTest(unittest.IsolatedAsyncioTestCase):
+    async def test_update_listing_uses_browser_strategy_by_default(self) -> None:
+        settings = SimpleNamespace()
+        logger = logging.getLogger("test")
+        alerts = SimpleNamespace()
+        metrics = _FakeMetrics()
+        browser_outcome = SimpleNamespace(latency_ms=123.0)
+
+        with (
+            patch("main.bump_listing_via_browser", new=AsyncMock(return_value=browser_outcome)) as bump_browser,
+            patch("main.bump_listing", new=AsyncMock()) as bump_request,
+        ):
+            result = await main._update_listing(
+                "12188101",
+                settings=settings,
+                logger=logger,
+                alerts=alerts,
+                metrics=metrics,
+            )
+
+        self.assertIs(result, browser_outcome)
+        bump_browser.assert_awaited_once_with("12188101", settings=settings, logger=logger)
+        bump_request.assert_not_awaited()
+
+    async def test_run_cycle_skips_request_session_bootstrap_in_browser_mode(self) -> None:
+        settings = SimpleNamespace(
+            listing_ids=("12188101",),
+            dry_run=False,
+            update_strategy="browser",
+            captcha_retry_delay_seconds=1800,
+            failure_delay_seconds=300,
+        )
+        logger = logging.getLogger("test")
+        alerts = SimpleNamespace(
+            notify_captcha_detected=AsyncMock(),
+            notify_login_failed=AsyncMock(),
+            notify_listing_update_failed=AsyncMock(),
+        )
+        metrics = _FakeMetrics()
+        bump_outcome = SimpleNamespace(latency_ms=42.0)
+        stop_event = unittest.mock.Mock()
+        stop_event.is_set.return_value = False
+
+        with (
+            patch("main._ensure_session", new=AsyncMock()) as ensure_session,
+            patch("main._update_listing", new=AsyncMock(return_value=bump_outcome)) as update_listing,
+        ):
+            outcome = await main._run_cycle(
+                settings=settings,
+                logger=logger,
+                alerts=alerts,
+                metrics=metrics,
+                stop_event=stop_event,
+                cycle_number=1,
+            )
+
+        self.assertEqual(outcome.successful_listing_ids, ["12188101"])
+        ensure_session.assert_not_awaited()
+        update_listing.assert_awaited_once_with(
+            "12188101",
+            settings=settings,
+            logger=logger,
+            alerts=alerts,
+            metrics=metrics,
+        )
 
 
 if __name__ == "__main__":
