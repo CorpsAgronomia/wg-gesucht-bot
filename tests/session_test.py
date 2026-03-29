@@ -13,11 +13,13 @@ import httpx
 from bot.session_manager import (
     SessionData,
     SessionManagerError,
+    get_stored_or_refreshed_session,
     load_session,
     login_via_api,
     refresh_session,
     refresh_session_via_api,
     save_session,
+    session_cookies_for_browser,
 )
 
 
@@ -276,6 +278,121 @@ class SessionRefreshStrategyTest(unittest.IsolatedAsyncioTestCase):
         login_via_api_mock.assert_awaited_once()
         refresh_via_api_mock.assert_not_awaited()
         save_session_mock.assert_called_once_with(refreshed_session, settings=settings)
+
+    async def test_get_stored_or_refreshed_session_returns_refreshed_session(self) -> None:
+        settings = SimpleNamespace(request_timeout_seconds=10, user_agent="UnitTestAgent/1.0")
+        existing_session = SessionData(
+            cookies=[{"name": "sessionid", "value": "abc", "domain": ".wg-gesucht.de", "path": "/"}],
+            csrf_token="csrf-token",
+            user_agent="UnitTestAgent/1.0",
+            captured_at="2026-03-12T00:00:00+00:00",
+            access_token="access-token",
+            refresh_token="refresh-token",
+            client_id="client-id",
+            dev_ref_no="dev-ref",
+            user_id="12345678",
+            login_token="login-token",
+        )
+        refreshed_session = SessionData(
+            cookies=[{"name": "sessionid", "value": "new", "domain": ".wg-gesucht.de", "path": "/"}],
+            csrf_token="new-csrf-token",
+            user_agent="UnitTestAgent/1.0",
+            captured_at="2026-03-12T00:05:00+00:00",
+            access_token="new-access-token",
+            refresh_token="new-refresh-token",
+            client_id="client-id",
+            dev_ref_no="new-dev-ref",
+            user_id="12345678",
+            login_token="new-login-token",
+        )
+
+        with (
+            patch("bot.session_manager.load_session", return_value=existing_session),
+            patch(
+                "bot.session_manager.refresh_session_via_api",
+                new=unittest.mock.AsyncMock(return_value=refreshed_session),
+            ) as refresh_via_api_mock,
+            patch("bot.session_manager.save_session") as save_session_mock,
+        ):
+            session = await get_stored_or_refreshed_session(settings=settings, logger=logging.getLogger("test"))
+
+        self.assertIs(session, refreshed_session)
+        refresh_via_api_mock.assert_awaited_once()
+        save_session_mock.assert_called_once_with(refreshed_session, settings=settings)
+
+    async def test_get_stored_or_refreshed_session_reuses_existing_session_when_refresh_fails(self) -> None:
+        settings = SimpleNamespace(request_timeout_seconds=10, user_agent="UnitTestAgent/1.0")
+        existing_session = SessionData(
+            cookies=[{"name": "sessionid", "value": "abc", "domain": ".wg-gesucht.de", "path": "/"}],
+            csrf_token="csrf-token",
+            user_agent="UnitTestAgent/1.0",
+            captured_at="2026-03-12T00:00:00+00:00",
+            access_token="access-token",
+            refresh_token="refresh-token",
+            client_id="client-id",
+            dev_ref_no="dev-ref",
+            user_id="12345678",
+            login_token="login-token",
+        )
+
+        with (
+            patch("bot.session_manager.load_session", return_value=existing_session),
+            patch(
+                "bot.session_manager.refresh_session_via_api",
+                new=unittest.mock.AsyncMock(side_effect=SessionManagerError("refresh failed")),
+            ) as refresh_via_api_mock,
+            patch("bot.session_manager.save_session") as save_session_mock,
+        ):
+            session = await get_stored_or_refreshed_session(settings=settings, logger=logging.getLogger("test"))
+
+        self.assertIs(session, existing_session)
+        refresh_via_api_mock.assert_awaited_once()
+        save_session_mock.assert_not_called()
+
+
+class SessionCookieConversionTest(unittest.TestCase):
+    def test_session_cookies_for_browser_preserves_cookie_shape(self) -> None:
+        cookies = [
+            {
+                "name": "sessionid",
+                "value": "abc123",
+                "domain": ".wg-gesucht.de",
+                "path": "/",
+                "expires": 1234567890,
+                "httpOnly": True,
+                "secure": True,
+                "sameSite": "lax",
+            },
+            {
+                "name": "login_token",
+                "value": "xyz",
+                "path": "/",
+            },
+        ]
+
+        browser_cookies = session_cookies_for_browser(cookies, base_url="https://www.wg-gesucht.de/")
+
+        self.assertEqual(
+            browser_cookies[0],
+            {
+                "name": "sessionid",
+                "value": "abc123",
+                "domain": ".wg-gesucht.de",
+                "path": "/",
+                "expires": 1234567890.0,
+                "httpOnly": True,
+                "secure": True,
+                "sameSite": "Lax",
+            },
+        )
+        self.assertEqual(
+            browser_cookies[1],
+            {
+                "name": "login_token",
+                "value": "xyz",
+                "url": "https://www.wg-gesucht.de",
+            },
+        )
 
 
 if __name__ == "__main__":

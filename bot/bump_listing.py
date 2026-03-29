@@ -12,6 +12,7 @@ from bot.logger import log_event
 from bot.retry import build_async_retry
 from bot.selectors import (
     ACCOUNT_MENU,
+    COOKIE_ACCEPT,
     EDIT_PHOTOS,
     LISTING_OPTIONS_MENU,
     LOGOUT_LINK,
@@ -19,11 +20,19 @@ from bot.selectors import (
     UPDATE_AND_VIEW,
     UPDATE_CONFIRMATION,
     click,
+    click_optional,
     listing_target,
     resolve,
     resolve_optional,
 )
-from bot.session_manager import SessionManagerError, open_authenticated_context
+from bot.session_manager import (
+    SessionManagerError,
+    get_stored_or_refreshed_session,
+    login_via_api,
+    open_authenticated_context,
+    open_context_from_session,
+    save_session,
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -47,9 +56,16 @@ class BrowserBumpOutcome:
     dry_run: bool
 
 
+LISTING_EDITOR_URL_TEMPLATE = "https://www.wg-gesucht.de/angebot-bearbeiten.html?action=update_offer&offer_id={listing_id}"
+
+
 def _sanitize_target(target: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", target).strip("_")
     return normalized or "listing"
+
+
+def _listing_editor_url(listing_id: str) -> str:
+    return LISTING_EDITOR_URL_TEMPLATE.format(listing_id=listing_id)
 
 
 async def _open_my_listings(page, settings, logger) -> None:
@@ -140,6 +156,117 @@ async def open_listing_editor(page, settings, logger, target: str) -> None:
         component="bump_listing",
         target=target,
     )
+
+
+async def _open_listing_editor_direct(page, settings, logger, listing_id: str, *, source: str) -> None:
+    await page.goto(
+        _listing_editor_url(listing_id),
+        wait_until="domcontentloaded",
+        timeout=settings.navigation_timeout_ms,
+    )
+    if await click_optional(page, COOKIE_ACCEPT, settings=settings, logger=logger, timeout_ms=2000):
+        log_event(logger, "cookie_banner_dismissed", status="success", component="bump_listing")
+    await ensure_no_captcha(page)
+
+    update_button = await resolve_optional(
+        page,
+        UPDATE_AND_VIEW,
+        settings=settings,
+        logger=logger,
+        timeout_ms=5000,
+    )
+    if update_button is None:
+        raise SessionManagerError(
+            f"Listing editor did not load for listing '{listing_id}' via {source}. Current URL: {page.url}"
+        )
+
+    log_event(
+        logger,
+        "listing_editor_opened",
+        status="success",
+        component="bump_listing",
+        target=listing_id,
+        source=source,
+        direct_navigation=True,
+    )
+
+
+async def _open_editor_page_for_listing(listing_id: str, settings, logger):
+    last_error: Exception | None = None
+
+    stored_session = await get_stored_or_refreshed_session(settings=settings, logger=logger)
+    if stored_session is not None:
+        browser_session = await open_context_from_session(stored_session, settings=settings, logger=logger)
+        try:
+            await _open_listing_editor_direct(
+                browser_session.page,
+                settings,
+                logger,
+                listing_id,
+                source="stored_session",
+            )
+            return browser_session
+        except Exception as exc:
+            last_error = exc
+            log_event(
+                logger,
+                "listing_editor_direct_open_failed",
+                status="warning",
+                component="bump_listing",
+                level=logging.WARNING,
+                error=str(exc),
+                target=listing_id,
+                source="stored_session",
+            )
+            await browser_session.close()
+
+    with suppress(SessionManagerError):
+        api_session = await login_via_api(settings=settings, logger=logger)
+        save_session(api_session, settings=settings)
+        browser_session = await open_context_from_session(api_session, settings=settings, logger=logger)
+        try:
+            await _open_listing_editor_direct(
+                browser_session.page,
+                settings,
+                logger,
+                listing_id,
+                source="api_login",
+            )
+            return browser_session
+        except Exception as exc:
+            if isinstance(exc, CaptchaDetectedError):
+                await browser_session.close()
+                raise
+            last_error = exc
+            log_event(
+                logger,
+                "listing_editor_direct_open_failed",
+                status="warning",
+                component="bump_listing",
+                level=logging.WARNING,
+                error=str(exc),
+                target=listing_id,
+                source="api_login",
+            )
+            await browser_session.close()
+
+    browser_session = await open_authenticated_context(settings=settings, logger=logger)
+    try:
+        if last_error is not None:
+            log_event(
+                logger,
+                "listing_editor_fallback_browser_login",
+                status="warning",
+                component="bump_listing",
+                error=str(last_error),
+                target=listing_id,
+            )
+        await _open_my_listings(browser_session.page, settings, logger)
+        await open_listing_editor(browser_session.page, settings, logger, listing_id)
+        return browser_session
+    except Exception as exc:
+        await browser_session.close()
+        raise exc
 
 
 async def submit_listing_update(page, settings, logger, target: str) -> None:
@@ -270,10 +397,8 @@ async def bump_listing_via_browser(
     async for attempt in retrying:
         with attempt:
             started_at = perf_counter()
-            browser_session = await open_authenticated_context(settings=settings, logger=logger)
+            browser_session = await _open_editor_page_for_listing(listing_id, settings, logger)
             try:
-                await _open_my_listings(browser_session.page, settings, logger)
-                await open_listing_editor(browser_session.page, settings, logger, listing_id)
                 if settings.dry_run:
                     reason = "Dry run confirmed the update flow without submitting the listing."
                     log_event(

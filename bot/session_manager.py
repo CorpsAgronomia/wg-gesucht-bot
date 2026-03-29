@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from playwright.async_api import Browser, BrowserContext, Locator, Page, Playwright, async_playwright
@@ -139,6 +140,62 @@ def _serialize_cookies(cookies: httpx.Cookies) -> list[dict[str, Any]]:
             }
         )
     return serialized
+
+
+def _base_origin(base_url: str) -> str:
+    parsed = urlsplit(base_url)
+    scheme = parsed.scheme or "https"
+    host = parsed.netloc or parsed.path
+    return f"{scheme}://{host}"
+
+
+def _normalize_same_site(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if normalized == "lax":
+        return "Lax"
+    if normalized == "strict":
+        return "Strict"
+    if normalized == "none":
+        return "None"
+    return None
+
+
+def session_cookies_for_browser(cookies: list[dict[str, Any]], *, base_url: str) -> list[dict[str, Any]]:
+    origin = _base_origin(base_url)
+    browser_cookies: list[dict[str, Any]] = []
+
+    for cookie in cookies:
+        name = str(cookie.get("name", "")).strip()
+        if not name:
+            continue
+
+        browser_cookie: dict[str, Any] = {
+            "name": name,
+            "value": str(cookie.get("value", "")),
+        }
+        domain = str(cookie.get("domain", "")).strip()
+        path = str(cookie.get("path", "")).strip() or "/"
+        if domain:
+            browser_cookie["domain"] = domain
+            browser_cookie["path"] = path
+        else:
+            browser_cookie["url"] = origin
+
+        expires = cookie.get("expires")
+        if isinstance(expires, (int, float)) and expires > 0:
+            browser_cookie["expires"] = float(expires)
+        if "httpOnly" in cookie:
+            browser_cookie["httpOnly"] = bool(cookie.get("httpOnly"))
+        if "secure" in cookie:
+            browser_cookie["secure"] = bool(cookie.get("secure"))
+
+        same_site = _normalize_same_site(cookie.get("sameSite"))
+        if same_site is not None:
+            browser_cookie["sameSite"] = same_site
+
+        browser_cookies.append(browser_cookie)
+
+    return browser_cookies
 
 
 def _parse_refresh_payload(response: httpx.Response) -> dict[str, Any]:
@@ -353,6 +410,92 @@ async def _extract_user_id(page: Page) -> str:
             list(patterns),
         )
     return ""
+
+
+async def get_stored_or_refreshed_session(
+    settings: Settings | None = None,
+    logger=None,
+) -> SessionData | None:
+    settings = settings or load_settings()
+    logger = _get_logger(logger)
+
+    try:
+        existing_session = load_session(settings=settings)
+    except (FileNotFoundError, SessionManagerError):
+        return None
+
+    try:
+        refreshed_session = await refresh_session_via_api(existing_session, settings=settings, logger=logger)
+    except SessionManagerError as exc:
+        log_event(
+            logger,
+            "session_refresh_reused_stored_session",
+            status="warning",
+            component="session",
+            error=str(exc),
+        )
+        return existing_session
+
+    save_session(refreshed_session, settings=settings)
+    return refreshed_session
+
+
+async def open_context_from_session(
+    session: SessionData,
+    settings: Settings | None = None,
+    logger=None,
+    *,
+    headless: bool | None = None,
+) -> AuthenticatedBrowserSession:
+    settings = settings or load_settings()
+    logger = _get_logger(logger)
+
+    playwright = await async_playwright().start()
+    browser = await playwright.chromium.launch(
+        headless=settings.headless if headless is None else headless,
+        slow_mo=settings.slow_mo_ms,
+        args=["--disable-dev-shm-usage"],
+    )
+    context = await browser.new_context(
+        user_agent=session.user_agent or settings.user_agent,
+        viewport={"width": settings.viewport_width, "height": settings.viewport_height},
+        locale=settings.locale,
+        timezone_id=settings.timezone,
+    )
+    context.set_default_timeout(settings.action_timeout_ms)
+    context.set_default_navigation_timeout(settings.navigation_timeout_ms)
+
+    page: Page | None = None
+    try:
+        browser_cookies = session_cookies_for_browser(session.cookies, base_url=settings.base_url)
+        if browser_cookies:
+            await context.add_cookies(browser_cookies)
+
+        page = await context.new_page()
+        log_event(
+            logger,
+            "session_context_restored",
+            status="success",
+            component="session",
+            cookie_count=len(browser_cookies),
+        )
+        return AuthenticatedBrowserSession(
+            playwright=playwright,
+            browser=browser,
+            context=context,
+            page=page,
+        )
+    except Exception:
+        with suppress(Exception):
+            if page is not None:
+                await page.close()
+        with suppress(Exception):
+            await context.close()
+        with suppress(Exception):
+            await browser.close()
+        with suppress(Exception):
+            await playwright.stop()
+        raise
 
 
 async def open_authenticated_context(
