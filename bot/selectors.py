@@ -338,8 +338,11 @@ UPDATE_CONFIRMATION = SelectorGroup(
     "update_confirmation",
     (
         role("button", re.compile(r"Bestätigen|Ja|OK|Okay|Confirm", re.IGNORECASE)),
-        text(re.compile(r"Bestätigen|Ja|OK|Okay|Confirm", re.IGNORECASE)),
+        role("link", re.compile(r"Bestätigen|Ja|OK|Okay|Confirm", re.IGNORECASE)),
         css("button[class*='confirm' i]"),
+        css("button[data-bb-handler='confirm']"),
+        css(".modal-footer button.btn-primary"),
+        css("a[class*='confirm' i]"),
     ),
 )
 

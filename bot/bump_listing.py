@@ -68,6 +68,36 @@ def _listing_editor_url(listing_id: str) -> str:
     return LISTING_EDITOR_URL_TEMPLATE.format(listing_id=listing_id)
 
 
+async def _dismiss_blocking_modals(page, logger) -> None:
+    removed = await page.evaluate(
+        """() => {
+            let removed = 0;
+            const selectors = [
+                "#private_users_ad_modal",
+                ".campaign_display.modal",
+                ".modal-backdrop",
+            ];
+            for (const selector of selectors) {
+                for (const element of document.querySelectorAll(selector)) {
+                    element.remove();
+                    removed += 1;
+                }
+            }
+            document.body.classList.remove("modal-open");
+            document.body.style.removeProperty("padding-right");
+            return removed;
+        }"""
+    )
+    if removed:
+        log_event(
+            logger,
+            "blocking_modal_dismissed",
+            status="success",
+            component="bump_listing",
+            removed_elements=removed,
+        )
+
+
 async def _open_my_listings(page, settings, logger) -> None:
     await ensure_no_captcha(page)
     my_listings = await resolve_optional(
@@ -276,6 +306,7 @@ async def submit_listing_update(page, settings, logger, target: str) -> None:
     with suppress(Exception):
         await page.wait_for_load_state("domcontentloaded", timeout=settings.navigation_timeout_ms)
     await ensure_no_captcha(page)
+    await _dismiss_blocking_modals(page, logger)
 
     confirmation = await resolve_optional(
         page,
@@ -289,9 +320,11 @@ async def submit_listing_update(page, settings, logger, target: str) -> None:
         with suppress(Exception):
             await page.wait_for_load_state("domcontentloaded", timeout=settings.navigation_timeout_ms)
         await ensure_no_captcha(page)
+        await _dismiss_blocking_modals(page, logger)
 
     with suppress(Exception):
         await update_button.wait_for(state="hidden", timeout=settings.navigation_timeout_ms)
+    await _dismiss_blocking_modals(page, logger)
 
     still_visible = await resolve_optional(
         page,
