@@ -73,6 +73,10 @@ async def _dismiss_blocking_modals(page, logger) -> None:
         """() => {
             let removed = 0;
             const selectors = [
+                "#cmpbox",
+                "#cmpbox2",
+                ".cmpbox",
+                ".cmpboxBG",
                 "#private_users_ad_modal",
                 ".campaign_display.modal",
                 ".modal-backdrop",

@@ -86,5 +86,23 @@ class SubmitListingUpdateTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(stabilize.await_count, 3)
 
 
+class DismissBlockingModalsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_dismiss_blocking_modals_removes_cmpbox_overlays(self) -> None:
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=4)
+
+        with patch("bot.bump_listing.log_event") as log_event:
+            from bot.bump_listing import _dismiss_blocking_modals
+
+            await _dismiss_blocking_modals(page, logging.getLogger("test"))
+
+        script = page.evaluate.await_args.args[0]
+        self.assertIn("#cmpbox", script)
+        self.assertIn("#cmpbox2", script)
+        self.assertIn(".cmpbox", script)
+        self.assertIn(".cmpboxBG", script)
+        log_event.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
