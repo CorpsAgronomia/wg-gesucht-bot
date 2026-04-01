@@ -98,6 +98,50 @@ async def _dismiss_blocking_modals(page, logger) -> None:
         )
 
 
+async def _stabilize_editor_state(page, logger) -> None:
+    for _ in range(3):
+        await _dismiss_blocking_modals(page, logger)
+        await page.wait_for_timeout(150)
+
+
+async def _click_with_overlay_retries(locator, page, logger, *, timeout_ms: int, attempts: int = 3) -> None:
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        await _stabilize_editor_state(page, logger)
+        try:
+            await locator.click(timeout=timeout_ms)
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt == attempts - 1:
+                raise
+    if last_error is not None:
+        raise last_error
+
+
+async def _find_confirmation(page, settings, logger):
+    await _stabilize_editor_state(page, logger)
+    dialogs = page.locator("[role='dialog'], .modal.in, .modal.show")
+    with suppress(Exception):
+        visible_dialog = await resolve_optional(
+            dialogs,
+            UPDATE_CONFIRMATION,
+            settings=settings,
+            logger=logger,
+            timeout_ms=2500,
+        )
+        if visible_dialog is not None:
+            return visible_dialog
+
+    return await resolve_optional(
+        page,
+        UPDATE_CONFIRMATION,
+        settings=settings,
+        logger=logger,
+        timeout_ms=2500,
+    )
+
+
 async def _open_my_listings(page, settings, logger) -> None:
     await ensure_no_captcha(page)
     my_listings = await resolve_optional(
@@ -197,6 +241,7 @@ async def _open_listing_editor_direct(page, settings, logger, listing_id: str, *
     if await click_optional(page, COOKIE_ACCEPT, settings=settings, logger=logger, timeout_ms=2000):
         log_event(logger, "cookie_banner_dismissed", status="success", component="bump_listing")
     await ensure_no_captcha(page)
+    await _stabilize_editor_state(page, logger)
 
     update_button = await resolve_optional(
         page,
@@ -300,31 +345,36 @@ async def _open_editor_page_for_listing(listing_id: str, settings, logger):
 
 
 async def submit_listing_update(page, settings, logger, target: str) -> None:
+    await _stabilize_editor_state(page, logger)
     update_button = await resolve(page, UPDATE_AND_VIEW, settings=settings, logger=logger)
     previous_url = page.url
-    await update_button.click()
+    await _click_with_overlay_retries(
+        update_button,
+        page,
+        logger,
+        timeout_ms=settings.action_timeout_ms,
+    )
     with suppress(Exception):
         await page.wait_for_load_state("domcontentloaded", timeout=settings.navigation_timeout_ms)
     await ensure_no_captcha(page)
-    await _dismiss_blocking_modals(page, logger)
+    await _stabilize_editor_state(page, logger)
 
-    confirmation = await resolve_optional(
-        page,
-        UPDATE_CONFIRMATION,
-        settings=settings,
-        logger=logger,
-        timeout_ms=4000,
-    )
+    confirmation = await _find_confirmation(page, settings, logger)
     if confirmation is not None:
-        await confirmation.click()
+        await _click_with_overlay_retries(
+            confirmation,
+            page,
+            logger,
+            timeout_ms=settings.action_timeout_ms,
+        )
         with suppress(Exception):
             await page.wait_for_load_state("domcontentloaded", timeout=settings.navigation_timeout_ms)
         await ensure_no_captcha(page)
-        await _dismiss_blocking_modals(page, logger)
+        await _stabilize_editor_state(page, logger)
 
     with suppress(Exception):
         await update_button.wait_for(state="hidden", timeout=settings.navigation_timeout_ms)
-    await _dismiss_blocking_modals(page, logger)
+    await _stabilize_editor_state(page, logger)
 
     still_visible = await resolve_optional(
         page,

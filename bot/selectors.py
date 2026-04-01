@@ -337,12 +337,14 @@ UPDATE_AND_VIEW = SelectorGroup(
 UPDATE_CONFIRMATION = SelectorGroup(
     "update_confirmation",
     (
+        css("div[role='dialog'] button[data-bb-handler='confirm']"),
+        css("div[role='dialog'] .modal-footer button.btn-primary"),
+        css("div[role='dialog'] button[class*='confirm' i]"),
+        css("div[role='dialog'] a[class*='confirm' i]"),
         role("button", re.compile(r"Bestätigen|Ja|OK|Okay|Confirm", re.IGNORECASE)),
         role("link", re.compile(r"Bestätigen|Ja|OK|Okay|Confirm", re.IGNORECASE)),
-        css("button[class*='confirm' i]"),
         css("button[data-bb-handler='confirm']"),
         css(".modal-footer button.btn-primary"),
-        css("a[class*='confirm' i]"),
     ),
 )
 
