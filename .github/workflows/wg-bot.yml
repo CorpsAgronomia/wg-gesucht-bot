@@ -2,21 +2,34 @@ name: WG Gesucht Bot
 
 on:
   schedule:
-    # Pseudo-randomized 2-hour cadence during daytime with margin under 2,000
-    # GitHub-hosted Actions minutes on the current measured runtime.
-    - cron: "7 8,10,12,14,16,18,20,22 * * 1"
+    # Pseudo-randomized 90-minute cadence during daytime.
+    - cron: "7 8,11,14,17,20,23 * * 1"
       timezone: "Europe/Berlin"
-    - cron: "11 8,10,12,14,16,18,20,22 * * 2"
+    - cron: "37 9,12,15,18,21 * * 1"
       timezone: "Europe/Berlin"
-    - cron: "4 8,10,12,14,16,18,20,22 * * 3"
+    - cron: "11 8,11,14,17,20,23 * * 2"
       timezone: "Europe/Berlin"
-    - cron: "14 8,10,12,14,16,18,20,22 * * 4"
+    - cron: "41 9,12,15,18,21 * * 2"
       timezone: "Europe/Berlin"
-    - cron: "9 8,10,12,14,16,18,20,22 * * 5"
+    - cron: "4 8,11,14,17,20,23 * * 3"
       timezone: "Europe/Berlin"
-    - cron: "2 8,10,12,14,16,18,20,22 * * 6"
+    - cron: "34 9,12,15,18,21 * * 3"
       timezone: "Europe/Berlin"
-    - cron: "16 8,10,12,14,16,18,20,22 * * 0"
+    - cron: "14 8,11,14,17,20,23 * * 4"
+      timezone: "Europe/Berlin"
+    - cron: "44 9,12,15,18,21 * * 4"
+      timezone: "Europe/Berlin"
+    - cron: "9 8,11,14,17,20,23 * * 5"
+      timezone: "Europe/Berlin"
+    - cron: "39 9,12,15,18,21 * * 5"
+      timezone: "Europe/Berlin"
+    - cron: "2 8,11,14,17,20,23 * * 6"
+      timezone: "Europe/Berlin"
+    - cron: "32 9,12,15,18,21 * * 6"
+      timezone: "Europe/Berlin"
+    - cron: "16 8,11,14,17,20,23 * * 0"
+      timezone: "Europe/Berlin"
+    - cron: "46 9,12,15,18,21 * * 0"
       timezone: "Europe/Berlin"
   workflow_dispatch:
 
