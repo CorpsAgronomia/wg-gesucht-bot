@@ -27,6 +27,7 @@ class MetricsStore:
     successful_updates: int = 0
     failed_updates: int = 0
     retries: int = 0
+    browser_crashes: int = 0
     response_times: list[float] = field(default_factory=list)
     cycle: int = 0
     last_heartbeat_at: str | None = None
@@ -58,6 +59,10 @@ class MetricsStore:
         with self._lock:
             self.retries += count
 
+    def increment_browser_crashes(self, count: int = 1) -> None:
+        with self._lock:
+            self.browser_crashes += count
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {
@@ -69,6 +74,7 @@ class MetricsStore:
                 "successful_updates": self.successful_updates,
                 "failed_updates": self.failed_updates,
                 "retries": self.retries,
+                "browser_crashes": self.browser_crashes,
                 "response_times": list(self.response_times),
                 "last_heartbeat_at": self.last_heartbeat_at,
                 "last_success_at": self.last_success_at,

@@ -15,6 +15,7 @@ from playwright.async_api import Browser, BrowserContext, Locator, Page, Playwri
 from bot.captcha_detector import CaptchaDetectedError, ensure_no_captcha
 from bot.config import Settings, load_settings
 from bot.logger import log_event
+from bot.playwright_launcher import launch_chromium_browser
 from bot.selectors import (
     ACCOUNT_MENU,
     COOKIE_ACCEPT,
@@ -451,10 +452,13 @@ async def open_context_from_session(
     logger = _get_logger(logger)
 
     playwright = await async_playwright().start()
-    browser = await playwright.chromium.launch(
+    browser = await launch_chromium_browser(
+        playwright,
         headless=settings.headless if headless is None else headless,
-        slow_mo=settings.slow_mo_ms,
+        slow_mo_ms=settings.slow_mo_ms,
         args=["--disable-dev-shm-usage"],
+        logger=logger,
+        component="session",
     )
     context = await browser.new_context(
         user_agent=session.user_agent or settings.user_agent,
@@ -508,10 +512,13 @@ async def open_authenticated_context(
     logger = _get_logger(logger)
 
     playwright = await async_playwright().start()
-    browser = await playwright.chromium.launch(
+    browser = await launch_chromium_browser(
+        playwright,
         headless=settings.headless if headless is None else headless,
-        slow_mo=settings.slow_mo_ms,
+        slow_mo_ms=settings.slow_mo_ms,
         args=["--disable-dev-shm-usage"],
+        logger=logger,
+        component="session",
     )
     context = await browser.new_context(
         user_agent=settings.user_agent,

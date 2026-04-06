@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from playwright.async_api import Browser, BrowserContext, Dialog, Page, Playwright, async_playwright
 
 from bot.logger import log_event
+from bot.playwright_launcher import launch_chromium_browser
 from bot.retry import build_async_retry
 
 if TYPE_CHECKING:
@@ -58,10 +59,13 @@ class BrowserManager:
             self._playwright = await async_playwright().start()
 
         if self._browser is None or not self._browser.is_connected() or self._browser_disconnected:
-            self._browser = await self._playwright.chromium.launch(
+            self._browser = await launch_chromium_browser(
+                self._playwright,
                 headless=self.settings.headless,
-                slow_mo=self.settings.slow_mo_ms,
+                slow_mo_ms=self.settings.slow_mo_ms,
                 args=["--disable-dev-shm-usage"],
+                logger=self.logger,
+                component="browser",
             )
             self._browser.on("disconnected", self._on_browser_disconnected)
             self._browser_disconnected = False

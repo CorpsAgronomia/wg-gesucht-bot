@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from contextlib import suppress
 from dataclasses import dataclass
 from time import perf_counter
 
+from bot.bump_api import load_request_template
 from bot.captcha_detector import CaptchaDetectedError, ensure_no_captcha
 from bot.config import Settings, load_settings
 from bot.logger import log_event
+from bot.request_client import RequestClient
+from bot.request_templates import resolve_template_path
+from bot.response_validator import capture_listing_timestamp
 from bot.retry import build_async_retry
 from bot.selectors import (
     ACCOUNT_MENU,
+    CONSENT_MODAL_ACCEPT,
     COOKIE_ACCEPT,
     EDIT_PHOTOS,
     LISTING_OPTIONS_MENU,
@@ -27,6 +33,7 @@ from bot.selectors import (
 )
 from bot.session_manager import (
     SessionManagerError,
+    SessionData,
     get_stored_or_refreshed_session,
     login_via_api,
     open_authenticated_context,
@@ -56,7 +63,17 @@ class BrowserBumpOutcome:
     dry_run: bool
 
 
+@dataclass(slots=True)
+class TimestampVerificationContext:
+    session: SessionData
+    template: dict
+    client: RequestClient
+    timestamp_before: str | None
+
+
 LISTING_EDITOR_URL_TEMPLATE = "https://www.wg-gesucht.de/angebot-bearbeiten.html?action=update_offer&offer_id={listing_id}"
+TIMESTAMP_VERIFICATION_ATTEMPTS = 4
+TIMESTAMP_VERIFICATION_DELAY_SECONDS = 3
 
 
 def _sanitize_target(target: str) -> str:
@@ -66,6 +83,51 @@ def _sanitize_target(target: str) -> str:
 
 def _listing_editor_url(listing_id: str) -> str:
     return LISTING_EDITOR_URL_TEMPLATE.format(listing_id=listing_id)
+
+
+async def _accept_blocking_modals(page, settings, logger) -> None:
+    accepted = False
+    with suppress(Exception):
+        accepted = await click_optional(
+            page,
+            CONSENT_MODAL_ACCEPT,
+            settings=settings,
+            logger=logger,
+            timeout_ms=1500,
+        )
+
+    clicked = await page.evaluate(
+        """() => {
+            const selectors = [
+                "#cmpbox button.cmpboxbtnyes",
+                "#cmpbox .cmpboxbtns button",
+                "#cmpbox button",
+            ];
+            const acceptPattern = /alle akzeptieren|akzeptieren|zustimmen|einverstanden|accept|agree/i;
+            let clicked = 0;
+            for (const selector of selectors) {
+                for (const element of document.querySelectorAll(selector)) {
+                    const text = (element.textContent || "").trim();
+                    const title = element.getAttribute("title") || "";
+                    const ariaLabel = element.getAttribute("aria-label") || "";
+                    if (!acceptPattern.test(`${text} ${title} ${ariaLabel}`)) {
+                        continue;
+                    }
+                    element.click();
+                    clicked += 1;
+                }
+            }
+            return clicked;
+        }"""
+    )
+    if accepted or clicked:
+        log_event(
+            logger,
+            "blocking_modal_accepted",
+            status="success",
+            component="bump_listing",
+            accepted_buttons=int(bool(accepted)) + clicked,
+        )
 
 
 async def _dismiss_blocking_modals(page, logger) -> None:
@@ -102,21 +164,37 @@ async def _dismiss_blocking_modals(page, logger) -> None:
         )
 
 
-async def _stabilize_editor_state(page, logger) -> None:
+async def _stabilize_editor_state(page, settings, logger) -> None:
     for _ in range(3):
+        await _accept_blocking_modals(page, settings, logger)
         await _dismiss_blocking_modals(page, logger)
         await page.wait_for_timeout(150)
 
 
-async def _click_with_overlay_retries(locator, page, logger, *, timeout_ms: int, attempts: int = 3) -> None:
+async def _click_with_overlay_retries(
+    locator,
+    page,
+    settings,
+    logger,
+    *,
+    timeout_ms: int,
+    attempts: int = 3,
+) -> None:
     last_error: Exception | None = None
     for attempt in range(attempts):
-        await _stabilize_editor_state(page, logger)
+        await _stabilize_editor_state(page, settings, logger)
         try:
             await locator.click(timeout=timeout_ms)
             return
         except Exception as exc:
             last_error = exc
+            if attempt == attempts - 1:
+                with suppress(Exception):
+                    await _accept_blocking_modals(page, settings, logger)
+                with suppress(Exception):
+                    await _dismiss_blocking_modals(page, logger)
+                await locator.click(timeout=timeout_ms, force=True)
+                return
             if attempt == attempts - 1:
                 raise
     if last_error is not None:
@@ -124,7 +202,7 @@ async def _click_with_overlay_retries(locator, page, logger, *, timeout_ms: int,
 
 
 async def _find_confirmation(page, settings, logger):
-    await _stabilize_editor_state(page, logger)
+    await _stabilize_editor_state(page, settings, logger)
     dialogs = page.locator("[role='dialog'], .modal.in, .modal.show")
     with suppress(Exception):
         visible_dialog = await resolve_optional(
@@ -137,13 +215,20 @@ async def _find_confirmation(page, settings, logger):
         if visible_dialog is not None:
             return visible_dialog
 
-    return await resolve_optional(
+    confirmation = await resolve_optional(
         page,
         UPDATE_CONFIRMATION,
         settings=settings,
         logger=logger,
         timeout_ms=2500,
     )
+    if confirmation is None:
+        return None
+
+    tag_name = await confirmation.evaluate("element => element.tagName.toLowerCase()")
+    if tag_name not in {"button", "a", "input"}:
+        return None
+    return confirmation
 
 
 async def _open_my_listings(page, settings, logger) -> None:
@@ -245,7 +330,7 @@ async def _open_listing_editor_direct(page, settings, logger, listing_id: str, *
     if await click_optional(page, COOKIE_ACCEPT, settings=settings, logger=logger, timeout_ms=2000):
         log_event(logger, "cookie_banner_dismissed", status="success", component="bump_listing")
     await ensure_no_captcha(page)
-    await _stabilize_editor_state(page, logger)
+    await _stabilize_editor_state(page, settings, logger)
 
     update_button = await resolve_optional(
         page,
@@ -349,36 +434,38 @@ async def _open_editor_page_for_listing(listing_id: str, settings, logger):
 
 
 async def submit_listing_update(page, settings, logger, target: str) -> None:
-    await _stabilize_editor_state(page, logger)
+    await _stabilize_editor_state(page, settings, logger)
     update_button = await resolve(page, UPDATE_AND_VIEW, settings=settings, logger=logger)
     previous_url = page.url
     await _click_with_overlay_retries(
         update_button,
         page,
+        settings,
         logger,
         timeout_ms=settings.action_timeout_ms,
     )
     with suppress(Exception):
         await page.wait_for_load_state("domcontentloaded", timeout=settings.navigation_timeout_ms)
     await ensure_no_captcha(page)
-    await _stabilize_editor_state(page, logger)
+    await _stabilize_editor_state(page, settings, logger)
 
     confirmation = await _find_confirmation(page, settings, logger)
     if confirmation is not None:
         await _click_with_overlay_retries(
             confirmation,
             page,
+            settings,
             logger,
             timeout_ms=settings.action_timeout_ms,
         )
         with suppress(Exception):
             await page.wait_for_load_state("domcontentloaded", timeout=settings.navigation_timeout_ms)
         await ensure_no_captcha(page)
-        await _stabilize_editor_state(page, logger)
+        await _stabilize_editor_state(page, settings, logger)
 
     with suppress(Exception):
         await update_button.wait_for(state="hidden", timeout=settings.navigation_timeout_ms)
-    await _stabilize_editor_state(page, logger)
+    await _stabilize_editor_state(page, settings, logger)
 
     still_visible = await resolve_optional(
         page,
@@ -398,6 +485,89 @@ async def submit_listing_update(page, settings, logger, target: str) -> None:
         target=target,
         final_url=page.url,
     )
+
+
+async def _prepare_timestamp_verification(listing_id: str, *, settings, logger) -> TimestampVerificationContext | None:
+    try:
+        session = await get_stored_or_refreshed_session(settings=settings, logger=logger)
+        if session is None:
+            return None
+
+        template = load_request_template(resolve_template_path(settings, listing_id))
+        client = RequestClient(settings=settings, logger=logger)
+        timestamp_before = None
+        for _ in range(TIMESTAMP_VERIFICATION_ATTEMPTS):
+            timestamp_before = await capture_listing_timestamp(client, template, session, listing_id)
+            if timestamp_before is not None:
+                break
+            await asyncio.sleep(1)
+        return TimestampVerificationContext(
+            session=session,
+            template=template,
+            client=client,
+            timestamp_before=timestamp_before,
+        )
+    except Exception as exc:
+        log_event(
+            logger,
+            "listing_timestamp_verification_unavailable",
+            status="warning",
+            component="bump_listing",
+            level=logging.WARNING,
+            listing_id=listing_id,
+            error=str(exc),
+        )
+        return None
+
+
+async def _verify_listing_update_via_timestamp(
+    listing_id: str,
+    *,
+    settings,
+    logger,
+    verification: TimestampVerificationContext | None,
+) -> bool:
+    if verification is None or verification.timestamp_before is None:
+        return False
+
+    for attempt in range(1, TIMESTAMP_VERIFICATION_ATTEMPTS + 1):
+        try:
+            timestamp_after = await capture_listing_timestamp(
+                verification.client,
+                verification.template,
+                verification.session,
+                listing_id,
+            )
+        except Exception as exc:
+            log_event(
+                logger,
+                "listing_timestamp_verification_failed",
+                status="warning",
+                component="bump_listing",
+                level=logging.WARNING,
+                listing_id=listing_id,
+                error=str(exc),
+                verification_attempt=attempt,
+            )
+            return False
+
+        if timestamp_after is not None and timestamp_after != verification.timestamp_before:
+            log_event(
+                logger,
+                "listing_update_verified_via_timestamp",
+                status="success",
+                component="bump_listing",
+                listing_id=listing_id,
+                timestamp_before=verification.timestamp_before,
+                timestamp_after=timestamp_after,
+                verification_attempt=attempt,
+            )
+            return True
+
+        if attempt < TIMESTAMP_VERIFICATION_ATTEMPTS:
+            await asyncio.sleep(TIMESTAMP_VERIFICATION_DELAY_SECONDS)
+
+    return False
 
 
 async def _bump_target_once(browser, settings, logger, target: str) -> None:
@@ -484,6 +654,11 @@ async def bump_listing_via_browser(
     async for attempt in retrying:
         with attempt:
             started_at = perf_counter()
+            verification = None if settings.dry_run else await _prepare_timestamp_verification(
+                listing_id,
+                settings=settings,
+                logger=logger,
+            )
             browser_session = await _open_editor_page_for_listing(listing_id, settings, logger)
             try:
                 if settings.dry_run:
@@ -496,8 +671,23 @@ async def bump_listing_via_browser(
                         listing_id=listing_id,
                     )
                 else:
-                    await submit_listing_update(browser_session.page, settings, logger, listing_id)
-                    reason = "Listing updated through the browser flow."
+                    timestamp_verified = False
+                    try:
+                        await submit_listing_update(browser_session.page, settings, logger, listing_id)
+                    except ListingUpdateError as exc:
+                        timestamp_verified = "No post-update transition was observed" in str(exc) and await _verify_listing_update_via_timestamp(
+                            listing_id,
+                            settings=settings,
+                            logger=logger,
+                            verification=verification,
+                        )
+                        if not timestamp_verified:
+                            raise
+                    reason = (
+                        "Listing updated through the browser flow."
+                        if not timestamp_verified
+                        else "Listing updated through the browser flow and verified via listing timestamp."
+                    )
 
                 latency_ms = (perf_counter() - started_at) * 1000
                 return BrowserBumpOutcome(

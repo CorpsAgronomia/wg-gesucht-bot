@@ -10,8 +10,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 HEADLESS = False
-MIN_DELAY = 7200
-MAX_DELAY = 14400
+MIN_DELAY = 1860
+MAX_DELAY = 3600
 RETRY_ATTEMPTS = 5
 UPDATE_STRATEGY = "browser"
 

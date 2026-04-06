@@ -5,25 +5,82 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call, patch
 
-from bot.bump_listing import _click_with_overlay_retries, _find_confirmation, submit_listing_update
+from bot.bump_listing import (
+    ListingUpdateError,
+    _accept_blocking_modals,
+    _click_with_overlay_retries,
+    _find_confirmation,
+    bump_listing_via_browser,
+    submit_listing_update,
+)
+
+
+class AcceptBlockingModalsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_accept_blocking_modals_clicks_consent_controls(self) -> None:
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=1)
+        settings = SimpleNamespace(action_timeout_ms=3000)
+
+        with (
+            patch("bot.bump_listing.click_optional", new=AsyncMock(return_value=True)) as click_optional,
+            patch("bot.bump_listing.log_event") as log_event,
+        ):
+            await _accept_blocking_modals(page, settings, logging.getLogger("test"))
+
+        click_optional.assert_awaited_once()
+        script = page.evaluate.await_args.args[0]
+        self.assertIn("#cmpbox button.cmpboxbtnyes", script)
+        self.assertIn("acceptPattern", script)
+        log_event.assert_called_once()
 
 
 class ClickWithOverlayRetriesTest(unittest.IsolatedAsyncioTestCase):
     async def test_retries_after_overlay_interference(self) -> None:
+        settings = SimpleNamespace()
         page = SimpleNamespace(wait_for_timeout=AsyncMock())
         locator = AsyncMock()
         locator.click = AsyncMock(side_effect=[RuntimeError("blocked"), None])
 
-        with patch("bot.bump_listing._dismiss_blocking_modals", new=AsyncMock()) as dismiss_modals:
+        with patch("bot.bump_listing._stabilize_editor_state", new=AsyncMock()) as stabilize:
             await _click_with_overlay_retries(
                 locator,
                 page,
+                settings,
                 logging.getLogger("test"),
                 timeout_ms=3000,
             )
 
         self.assertEqual(locator.click.await_count, 2)
-        self.assertEqual(dismiss_modals.await_count, 6)
+        self.assertEqual(stabilize.await_count, 2)
+
+    async def test_force_clicks_after_final_overlay_failure(self) -> None:
+        settings = SimpleNamespace()
+        page = SimpleNamespace(wait_for_timeout=AsyncMock())
+        locator = AsyncMock()
+        locator.click = AsyncMock(side_effect=[RuntimeError("blocked"), RuntimeError("blocked"), None])
+
+        with (
+            patch("bot.bump_listing._stabilize_editor_state", new=AsyncMock()),
+            patch("bot.bump_listing._accept_blocking_modals", new=AsyncMock()) as accept_modals,
+        ):
+            await _click_with_overlay_retries(
+                locator,
+                page,
+                settings,
+                logging.getLogger("test"),
+                timeout_ms=3000,
+                attempts=2,
+            )
+
+        self.assertEqual(
+            locator.click.await_args_list,
+            [
+                call(timeout=3000),
+                call(timeout=3000),
+                call(timeout=3000, force=True),
+            ],
+        )
+        accept_modals.assert_awaited_once()
 
 
 class FindConfirmationTest(unittest.IsolatedAsyncioTestCase):
@@ -78,8 +135,8 @@ class SubmitListingUpdateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             safe_click.await_args_list,
             [
-                call(update_button, page, logger, timeout_ms=settings.action_timeout_ms),
-                call(confirmation, page, logger, timeout_ms=settings.action_timeout_ms),
+                call(update_button, page, settings, logger, timeout_ms=settings.action_timeout_ms),
+                call(confirmation, page, settings, logger, timeout_ms=settings.action_timeout_ms),
             ],
         )
         self.assertEqual(ensure_no_captcha.await_count, 2)
@@ -101,7 +158,45 @@ class DismissBlockingModalsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("#cmpbox2", script)
         self.assertIn(".cmpbox", script)
         self.assertIn(".cmpboxBG", script)
+        self.assertIn("#private_users_ad_modal", script)
         log_event.assert_called_once()
+
+
+class BrowserBumpFallbackTest(unittest.IsolatedAsyncioTestCase):
+    async def test_browser_bump_uses_timestamp_fallback_when_no_transition_is_observed(self) -> None:
+        settings = SimpleNamespace(
+            dry_run=False,
+            retry_attempts=1,
+            retry_backoff_multiplier=1,
+            retry_backoff_min_seconds=1,
+            retry_backoff_max_seconds=1,
+        )
+        browser_session = SimpleNamespace(page=object(), close=AsyncMock())
+        verification = object()
+
+        with (
+            patch("bot.bump_listing._prepare_timestamp_verification", new=AsyncMock(return_value=verification)),
+            patch("bot.bump_listing._open_editor_page_for_listing", new=AsyncMock(return_value=browser_session)),
+            patch(
+                "bot.bump_listing.submit_listing_update",
+                new=AsyncMock(side_effect=ListingUpdateError("No post-update transition was observed for listing '12188101'.")),
+            ),
+            patch("bot.bump_listing._verify_listing_update_via_timestamp", new=AsyncMock(return_value=True)) as verify,
+        ):
+            outcome = await bump_listing_via_browser("12188101", settings=settings, logger=logging.getLogger("test"))
+
+        self.assertTrue(outcome.success)
+        self.assertEqual(
+            outcome.reason,
+            "Listing updated through the browser flow and verified via listing timestamp.",
+        )
+        verify.assert_awaited_once_with(
+            "12188101",
+            settings=settings,
+            logger=logging.getLogger("test"),
+            verification=verification,
+        )
+        browser_session.close.assert_awaited_once()
 
 
 if __name__ == "__main__":

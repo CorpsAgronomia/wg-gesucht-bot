@@ -217,6 +217,18 @@ COOKIE_ACCEPT = SelectorGroup(
     ),
 )
 
+CONSENT_MODAL_ACCEPT = SelectorGroup(
+    "consent_modal_accept",
+    (
+        css("#cmpbox button.cmpboxbtnyes"),
+        css("#cmpbox .cmpboxbtns button"),
+        css("#cmpbox button[title*='akzept' i]"),
+        css("#cmpbox button[aria-label*='akzept' i]"),
+        role("button", re.compile(r"Alle akzeptieren|Akzeptieren|Zustimmen|Einverstanden|Accept|Agree", re.IGNORECASE)),
+        text(re.compile(r"Alle akzeptieren|Akzeptieren|Zustimmen|Einverstanden|Accept|Agree", re.IGNORECASE)),
+    ),
+)
+
 ACCOUNT_MENU = SelectorGroup(
     "account_menu",
     (
@@ -337,14 +349,18 @@ UPDATE_AND_VIEW = SelectorGroup(
 UPDATE_CONFIRMATION = SelectorGroup(
     "update_confirmation",
     (
-        css("div[role='dialog'] button[data-bb-handler='confirm']"),
-        css("div[role='dialog'] .modal-footer button.btn-primary"),
-        css("div[role='dialog'] button[class*='confirm' i]"),
-        css("div[role='dialog'] a[class*='confirm' i]"),
-        role("button", re.compile(r"Bestätigen|Ja|OK|Okay|Confirm", re.IGNORECASE)),
-        role("link", re.compile(r"Bestätigen|Ja|OK|Okay|Confirm", re.IGNORECASE)),
         css("button[data-bb-handler='confirm']"),
         css(".modal-footer button.btn-primary"),
+        css("button[class*='confirm' i]"),
+        css("a[class*='confirm' i]"),
+        css("button.btn-primary"),
+        css("a.btn-primary"),
+        css("input[type='submit'][value*='Bestätigen' i]"),
+        css("input[type='submit'][value*='Confirm' i]"),
+        css("input[type='button'][value*='Bestätigen' i]"),
+        css("input[type='button'][value*='Confirm' i]"),
+        role("button", re.compile(r"^(Bestätigen|Ja|OK|Okay|Confirm)$", re.IGNORECASE)),
+        role("link", re.compile(r"^(Bestätigen|Ja|OK|Okay|Confirm)$", re.IGNORECASE)),
     ),
 )
 

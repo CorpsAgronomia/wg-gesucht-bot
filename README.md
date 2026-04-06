@@ -71,8 +71,8 @@ UPDATE_REQUEST_TEMPLATES_DIR=discovery/update_request_templates
 VALIDATION_CYCLES=10
 VALIDATION_SLEEP_SECONDS=60
 VALIDATION_REPORT_FILE=reports/validation_report.json
-MIN_DELAY=7200
-MAX_DELAY=14400
+MIN_DELAY=1860
+MAX_DELAY=3600
 ```
 
 `DRY_RUN=true` is the safe default. With `UPDATE_STRATEGY=browser`, the bot opens the listing editor and verifies the update flow without submitting it. With `UPDATE_STRATEGY=request`, the captured request is rendered and logged but not sent until you explicitly set `DRY_RUN=false`.
@@ -162,7 +162,7 @@ Flow:
 3. If `UPDATE_STRATEGY=browser`, open the editor and click `Aktualisieren und Ansehen`.
 4. If `UPDATE_STRATEGY=request`, load `discovery/update_request_template.json` and replay the captured request.
 5. Write metrics to `logs/metrics.json`.
-6. Sleep for a random delay between 7200 and 14400 seconds.
+6. Sleep for a random delay between 1860 and 3600 seconds.
 
 ## Metrics
 
@@ -171,6 +171,7 @@ Flow:
 - `successful_updates`
 - `failed_updates`
 - `retries`
+- `browser_crashes`
 - `response_times`
 
 It also includes heartbeat timestamps and cycle metadata for operations visibility.
