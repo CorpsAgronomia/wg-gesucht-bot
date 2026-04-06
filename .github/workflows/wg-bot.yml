@@ -58,14 +58,7 @@ jobs:
         run: |
           if [ "${{ steps.playwright-cache.outputs.cache-hit }}" != "true" ]; then
             python -m playwright install --with-deps chromium
-          elif python - <<'PY'
-from pathlib import Path
-from playwright.sync_api import sync_playwright
-
-with sync_playwright() as p:
-    executable = Path(p.chromium.executable_path)
-    raise SystemExit(0 if executable.exists() else 1)
-PY
+          elif python -c "import sys; from pathlib import Path; from playwright.sync_api import sync_playwright; p = sync_playwright().start(); executable = Path(p.chromium.executable_path); p.stop(); sys.exit(0 if executable.exists() else 1)"
           then
             echo "Chromium already available from cache"
           else
