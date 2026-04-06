@@ -45,7 +45,6 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Cache Playwright browser
@@ -57,10 +56,20 @@ jobs:
 
       - name: Install Chromium
         run: |
-          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
-            python -m playwright install chromium
-          else
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" != "true" ]; then
             python -m playwright install --with-deps chromium
+          elif python - <<'PY'
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    executable = Path(p.chromium.executable_path)
+    raise SystemExit(0 if executable.exists() else 1)
+PY
+          then
+            echo "Chromium already available from cache"
+          else
+            python -m playwright install chromium
           fi
 
       - name: Restore authenticated session

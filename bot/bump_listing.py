@@ -355,10 +355,16 @@ async def _open_listing_editor_direct(page, settings, logger, listing_id: str, *
     )
 
 
-async def _open_editor_page_for_listing(listing_id: str, settings, logger):
+async def _open_editor_page_for_listing(
+    listing_id: str,
+    settings,
+    logger,
+    *,
+    preferred_session: SessionData | None = None,
+):
     last_error: Exception | None = None
 
-    stored_session = await get_stored_or_refreshed_session(settings=settings, logger=logger)
+    stored_session = preferred_session or await get_stored_or_refreshed_session(settings=settings, logger=logger)
     if stored_session is not None:
         browser_session = await open_context_from_session(stored_session, settings=settings, logger=logger)
         try:
@@ -659,7 +665,12 @@ async def bump_listing_via_browser(
                 settings=settings,
                 logger=logger,
             )
-            browser_session = await _open_editor_page_for_listing(listing_id, settings, logger)
+            browser_session = await _open_editor_page_for_listing(
+                listing_id,
+                settings,
+                logger,
+                preferred_session=getattr(verification, "session", None),
+            )
             try:
                 if settings.dry_run:
                     reason = "Dry run confirmed the update flow without submitting the listing."
