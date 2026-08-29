@@ -72,10 +72,14 @@ async def _dismiss_blocking_modals(page, logger) -> None:
     removed = await page.evaluate(
         """() => {
             let removed = 0;
-            const selectors = [
+        const selectors = [
                 "#private_users_ad_modal",
                 ".campaign_display.modal",
                 ".modal-backdrop",
+                "#cmpbox",
+                "#cmpbox2",
+                ".cmpboxBG",
+            ];
             ];
             for (const selector of selectors) {
                 for (const element of document.querySelectorAll(selector)) {
@@ -194,8 +198,9 @@ async def _open_listing_editor_direct(page, settings, logger, listing_id: str, *
         wait_until="domcontentloaded",
         timeout=settings.navigation_timeout_ms,
     )
-    if await click_optional(page, COOKIE_ACCEPT, settings=settings, logger=logger, timeout_ms=2000):
+     if await click_optional(page, COOKIE_ACCEPT, settings=settings, logger=logger, timeout_ms=2000):
         log_event(logger, "cookie_banner_dismissed", status="success", component="bump_listing")
+    await _dismiss_blocking_modals(page, logger)
     await ensure_no_captcha(page)
 
     update_button = await resolve_optional(
@@ -301,6 +306,7 @@ async def _open_editor_page_for_listing(listing_id: str, settings, logger):
 
 async def submit_listing_update(page, settings, logger, target: str) -> None:
     update_button = await resolve(page, UPDATE_AND_VIEW, settings=settings, logger=logger)
+    await _dismiss_blocking_modals(page, logger)
     previous_url = page.url
     await update_button.click()
     with suppress(Exception):
@@ -469,5 +475,6 @@ async def bump_listing_via_browser(
                 raise
             finally:
                 await browser_session.close()
+
 
     raise ListingUpdateError(f"Failed to update listing '{listing_id}'.")
