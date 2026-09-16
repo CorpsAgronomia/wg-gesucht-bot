@@ -85,7 +85,16 @@ jobs:
           DRY_RUN: "false"
           TIMEZONE: "Europe/Berlin"
           UPDATE_STRATEGY: "browser"
+       - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: logs/screenshots/
+          if-no-files-found: ignore
+          retention-days: 7
 
+      - name: Persist refreshed session
       - name: Persist refreshed session
         if: always()
         run: |
