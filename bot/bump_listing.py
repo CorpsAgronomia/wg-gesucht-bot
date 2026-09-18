@@ -4,6 +4,7 @@ import logging
 import re
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from time import perf_counter
 
 from bot.captcha_detector import CaptchaDetectedError, ensure_no_captcha
@@ -460,7 +461,13 @@ async def bump_listing_via_browser(
                     reason=reason,
                     dry_run=settings.dry_run,
                 )
-            except Exception as exc:
+                  except Exception as exc:
+                screenshot_path = None
+                with suppress(Exception):
+                    settings.screenshots_dir.mkdir(parents=True, exist_ok=True)
+                    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                    screenshot_path = settings.screenshots_dir / f"bump_failure_{listing_id}_{timestamp}.png"
+                    await browser_session.page.screenshot(path=str(screenshot_path), full_page=True)
                 log_event(
                     logger,
                     "listing_bump_attempt_failed",
@@ -470,6 +477,7 @@ async def bump_listing_via_browser(
                     error=str(exc),
                     target=listing_id,
                     attempt=attempt.retry_state.attempt_number,
+                    screenshot=str(screenshot_path) if screenshot_path else None,
                 )
                 raise
             finally:
