@@ -461,7 +461,7 @@ async def bump_listing_via_browser(
                     reason=reason,
                     dry_run=settings.dry_run,
                 )
-                  except Exception as exc:
+            except Exception as exc:
                 screenshot_path = None
                 with suppress(Exception):
                     settings.screenshots_dir.mkdir(parents=True, exist_ok=True)
