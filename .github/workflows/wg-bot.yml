@@ -2,20 +2,20 @@ name: WG Gesucht Bot
 
 on:
   schedule:
-    # Pseudo-randomized ~60-minute cadence without billed in-run jitter.
-    - cron: "7 7-22 * * 1"
+    # Three runs per day (morning, afternoon, evening) with slightly varying minutes.
+    - cron: "7 8,13,19 * * 1"
       timezone: "Europe/Berlin"
-    - cron: "11 7-22 * * 2"
+    - cron: "11 8,13,19 * * 2"
       timezone: "Europe/Berlin"
-    - cron: "4 7-22 * * 3"
+    - cron: "4 8,13,19 * * 3"
       timezone: "Europe/Berlin"
-    - cron: "14 7-22 * * 4"
+    - cron: "14 8,13,19 * * 4"
       timezone: "Europe/Berlin"
-    - cron: "9 7-22 * * 5"
+    - cron: "9 8,13,19 * * 5"
       timezone: "Europe/Berlin"
-    - cron: "2 7-22 * * 6"
+    - cron: "2 8,13,19 * * 6"
       timezone: "Europe/Berlin"
-    - cron: "16 7-22 * * 0"
+    - cron: "16 8,13,19 * * 0"
       timezone: "Europe/Berlin"
   workflow_dispatch:
 
