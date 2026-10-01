@@ -333,6 +333,12 @@ UPDATE_AND_VIEW = SelectorGroup(
         css("button[name*='update' i]"),
     ),
 )
+LAST_UPDATED_TEXT = SelectorGroup(
+    "last_updated_text",
+    (
+        text(re.compile(r"Zuletzt aktualisiert", re.IGNORECASE)),
+    ),
+)
 
 UPDATE_CONFIRMATION = SelectorGroup(
     "update_confirmation",
