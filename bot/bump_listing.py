@@ -15,6 +15,7 @@ from bot.selectors import (
     ACCOUNT_MENU,
     COOKIE_ACCEPT,
     EDIT_PHOTOS,
+    LAST_UPDATED_TEXT,
     LISTING_OPTIONS_MENU,
     LOGOUT_LINK,
     MY_LISTINGS,
@@ -304,10 +305,26 @@ async def _open_editor_page_for_listing(listing_id: str, settings, logger):
         raise exc
 
 
+async def _read_last_updated_text(page, settings, logger) -> str | None:
+    locator = await resolve_optional(
+        page,
+        LAST_UPDATED_TEXT,
+        settings=settings,
+        logger=logger,
+        timeout_ms=2000,
+    )
+    if locator is None:
+        return None
+    try:
+        return (await locator.inner_text()).strip()
+    except Exception:
+        return None
+
 async def submit_listing_update(page, settings, logger, target: str) -> None:
     update_button = await resolve(page, UPDATE_AND_VIEW, settings=settings, logger=logger)
     await _dismiss_blocking_modals(page, logger)
     previous_url = page.url
+    timestamp_before = await _read_last_updated_text(page, settings, logger)
     await update_button.click()
     with suppress(Exception):
         await page.wait_for_load_state("domcontentloaded", timeout=settings.navigation_timeout_ms)
@@ -329,8 +346,15 @@ async def submit_listing_update(page, settings, logger, target: str) -> None:
         await _dismiss_blocking_modals(page, logger)
 
     with suppress(Exception):
-        await update_button.wait_for(state="hidden", timeout=settings.navigation_timeout_ms)
+        await update_button.wait_for(state="hidden", timeout=5000)
     await _dismiss_blocking_modals(page, logger)
+
+    timestamp_after = await _read_last_updated_text(page, settings, logger)
+    timestamp_changed = (
+        timestamp_before is not None
+        and timestamp_after is not None
+        and timestamp_before != timestamp_after
+    )
 
     still_visible = await resolve_optional(
         page,
@@ -339,7 +363,10 @@ async def submit_listing_update(page, settings, logger, target: str) -> None:
         logger=logger,
         timeout_ms=2000,
     )
-    if still_visible is not None and page.url == previous_url:
+    navigated = page.url != previous_url
+    button_gone = still_visible is None
+
+    if not (timestamp_changed or navigated or button_gone):
         raise ListingUpdateError(f"No post-update transition was observed for listing '{target}'.")
 
     log_event(
@@ -349,6 +376,8 @@ async def submit_listing_update(page, settings, logger, target: str) -> None:
         component="bump_listing",
         target=target,
         final_url=page.url,
+        timestamp_before=timestamp_before,
+        timestamp_after=timestamp_after,
     )
 
 
